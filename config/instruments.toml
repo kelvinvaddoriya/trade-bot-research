@@ -1,0 +1,188 @@
+# Whitelisted instruments (docs/03 §3). ISINs to be confirmed against Trading 212 metadata in P1.
+# yahoo  = research history source (docs/10, step 4)
+# alpaca = official US data, used to cross-check Yahoo and (from P1) as the US runtime source
+# proxy  = US-listed twin whose EUR-converted history stands in before the UCITS ETF existed
+# native_from = first date the instrument's own Yahoo history is trusted (earlier Xetra ETF data is
+#               stale or wrong; see docs/10 step 4). Proxy history, if any, is used before it.
+
+# --- S1: UCITS ETFs on Xetra -------------------------------------------------
+[SXR8]
+name = "iShares Core S&P 500 UCITS ETF (Acc)"
+isin = "IE00B5BMR087"
+market = "XETR"
+currency = "EUR"
+strategy = "s1_trend"
+yahoo = "SXR8.DE"
+proxy = "SPY"
+native_from = "2014-01-01"
+
+[SXRV]
+name = "iShares Nasdaq 100 UCITS ETF (Acc)"
+isin = "IE00B53SZB19"
+market = "XETR"
+currency = "EUR"
+strategy = "s1_trend"
+yahoo = "SXRV.DE"
+proxy = "QQQ"
+native_from = "2014-01-01"
+
+[EXW1]
+name = "iShares Core EURO STOXX 50 UCITS ETF (DE)"
+isin = "DE0005933956"
+market = "XETR"
+currency = "EUR"
+strategy = "s1_trend"
+yahoo = "EXW1.DE"
+proxy = "FEZ"
+native_from = "2009-01-01"
+
+[IS3N]
+name = "iShares Core MSCI EM IMI UCITS ETF (Acc)"
+isin = "IE00BKM4GZ66"
+market = "XETR"
+currency = "EUR"
+strategy = "s1_trend"
+yahoo = "IS3N.DE"
+proxy = "EEM"
+
+[EUNH]
+name = "iShares Core Euro Government Bond UCITS ETF (Dist)"
+isin = "IE00B4WXJJ64"
+market = "XETR"
+currency = "EUR"
+strategy = "s1_trend"
+yahoo = "EUNH.DE"
+native_from = "2013-01-01"
+# no US-listed twin for euro government bonds, so EUNH joins the universe in 2013
+# (2009-2012 Yahoo data is mostly stale zero-volume days, which would fake near-zero volatility)
+
+[4GLD]
+name = "Xetra-Gold (ETC)"
+isin = "DE000A0S9GB0"
+market = "XETR"
+currency = "EUR"
+strategy = "s1_trend"
+yahoo = "4GLD.DE"
+proxy = "GLD"
+
+# --- S2: US large caps ---------------------------------------------------------
+[AAPL]
+name = "Apple"
+isin = "US0378331005"
+market = "XNYS"
+currency = "USD"
+strategy = "s2_pullback"
+yahoo = "AAPL"
+alpaca = "AAPL"
+
+[MSFT]
+name = "Microsoft"
+isin = "US5949181045"
+market = "XNYS"
+currency = "USD"
+strategy = "s2_pullback"
+yahoo = "MSFT"
+alpaca = "MSFT"
+
+[NVDA]
+name = "NVIDIA"
+isin = "US67066G1040"
+market = "XNYS"
+currency = "USD"
+strategy = "s2_pullback"
+yahoo = "NVDA"
+alpaca = "NVDA"
+
+[AMZN]
+name = "Amazon"
+isin = "US0231351067"
+market = "XNYS"
+currency = "USD"
+strategy = "s2_pullback"
+yahoo = "AMZN"
+alpaca = "AMZN"
+
+[GOOGL]
+name = "Alphabet (Class A)"
+isin = "US02079K3059"
+market = "XNYS"
+currency = "USD"
+strategy = "s2_pullback"
+yahoo = "GOOGL"
+alpaca = "GOOGL"
+
+[META]
+name = "Meta Platforms"
+isin = "US30303M1027"
+market = "XNYS"
+currency = "USD"
+strategy = "s2_pullback"
+yahoo = "META"
+alpaca = "META"
+
+[JPM]
+name = "JPMorgan Chase"
+isin = "US46625H1005"
+market = "XNYS"
+currency = "USD"
+strategy = "s2_pullback"
+yahoo = "JPM"
+alpaca = "JPM"
+
+[XOM]
+name = "Exxon Mobil"
+isin = "US30231G1022"
+market = "XNYS"
+currency = "USD"
+strategy = "s2_pullback"
+yahoo = "XOM"
+alpaca = "XOM"
+
+# --- S2: Xetra large caps --------------------------------------------------------
+[SAP]
+name = "SAP"
+isin = "DE0007164600"
+market = "XETR"
+currency = "EUR"
+strategy = "s2_pullback"
+yahoo = "SAP.DE"
+
+[SIE]
+name = "Siemens"
+isin = "DE0007236101"
+market = "XETR"
+currency = "EUR"
+strategy = "s2_pullback"
+yahoo = "SIE.DE"
+
+[ALV]
+name = "Allianz"
+isin = "DE0008404005"
+market = "XETR"
+currency = "EUR"
+strategy = "s2_pullback"
+yahoo = "ALV.DE"
+
+[DTE]
+name = "Deutsche Telekom"
+isin = "DE0005557508"
+market = "XETR"
+currency = "EUR"
+strategy = "s2_pullback"
+yahoo = "DTE.DE"
+
+[MUV2]
+name = "Munich Re"
+isin = "DE0008430026"
+market = "XETR"
+currency = "EUR"
+strategy = "s2_pullback"
+yahoo = "MUV2.DE"
+
+[BMW]
+name = "BMW"
+isin = "DE0005190003"
+market = "XETR"
+currency = "EUR"
+strategy = "s2_pullback"
+yahoo = "BMW.DE"

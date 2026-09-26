@@ -1,0 +1,23 @@
+[project]
+name = "tradebot"
+version = "0.1.0"
+description = "Research prototype of a guarded trading agent (see docs/)"
+requires-python = ">=3.12"
+dependencies = [
+    "pandas>=2.2",
+    "numpy>=2.0",
+    "matplotlib>=3.9",
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tradebot"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

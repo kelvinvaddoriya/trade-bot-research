@@ -1,0 +1,267 @@
+# 10 — Build log
+
+One entry per backlog step ([07](07-roadmap.md)): what was built, decisions made, how to run it, and the results. Newest phase first; steps in order within a phase.
+
+## P0: Foundations & backtest (started 2026-09-25)
+
+### Step 1: Repository setup
+
+**Built:**
+- `git init -b main` (no commits yet; committing is the owner's call).
+- `pyproject.toml`: package `tradebot` under `src/`. Runtime deps: `pandas`, `numpy`, `matplotlib`. Dev dep: `pytest`.
+- `uv sync --python 3.13` created `.venv/` and `uv.lock`. The lockfile pins every package with sha256 hashes (468 hashes), per the supply-chain rule in [04 §11](04-architecture.md#11-tech-stack).
+- `.gitignore`: `.env`, `data/`, `*.db`, `.venv/`, `__pycache__/`, `.pytest_cache/`.
+
+**Versions:** Python 3.13.12, pandas 3.0.6, numpy 2.5.3, matplotlib 3.11.2, pytest 9.1.1.
+
+**Decisions:**
+- Python 3.13 instead of the 3.12 in the docs. It's what's installed, and nothing needs 3.12.
+- No `alpaca-py`: Alpaca's REST endpoints are called with the standard library (`urllib`), as `check_keys.py` already does. One dependency fewer.
+
+**Run:** `uv sync` (install) · `uv run pytest` (tests) · `uv run python -m tradebot …` (CLI, from step 9).
+
+### Step 2: Data contracts (`src/tradebot/models.py`)
+
+**Built:** frozen dataclasses `Signal`, `OrderIntent`, `RiskDecision`, `Trade`, a mutable `Position` (one strategy lot), and `intent_id()`, a deterministic hash of strategy, symbol, side and bar date ([04 §4](04-architecture.md#4-core-data-contracts-sketch)).
+
+**Decisions:**
+- `Signal.kind` has a third value, `trail`: S1 raises its protective stop at each monthly check, and that's a strategy decision like entries and exits.
+- **Floats in research code, `Decimal` at the broker boundary.** The docs said `Decimal` everywhere. Doing that across pandas backtests is slow and awkward, and the rounding problem only exists where quantities and prices go to Trading 212. That boundary is built in P1.
+
+### Step 3: Config loading with bounds (`src/tradebot/config.py`, `config/*.toml`)
+
+**Built:**
+- `config/risk.toml`: the limits from [05 §2](05-risk-and-safety.md#2-limits).
+- `config/instruments.toml`: all 20 instruments with ISIN, market, currency, data symbols and proxy.
+- `config/settings.toml`: strategy budgets (€600 / €400), the cost model, and test periods.
+- `load_risk()` rejects a missing key or any value outside `BOUNDS`, `allow_short = true`, an empty whitelist, or inconsistent order sizes. It returns a short sha256 hash of the file for the journal.
+
+**Decisions:**
+- **The €1,000 cap is enforced in code:** `capital_cap_eur` has an upper bound of 1000, so raising it needs a code change, not just a config edit.
+- The ISINs were filled in from public listings. They're confirmed against Trading 212's instrument metadata in P1 ([07](07-roadmap.md#trading-212-api-facts-and-p1-adapter-tests)).
+
+**Tests (`tests/test_config.py`, 8):** the shipped config loads and the whitelist equals the instrument list. Six kinds of bad config make it refuse to start: cap above €1,000, drawdown typed as `10` instead of `0.10`, shorting enabled, empty whitelist, minimum order above the maximum position, and a missing key. The hash changes when the content changes.
+
+### Step 4: Market data (`src/tradebot/data.py`, `python -m tradebot data`)
+
+**Built:**
+- Downloaders for Yahoo's chart API (daily OHLC, dividend-adjusted close), Alpaca (`feed=sip`, `adjustment=all`, paginated) and Frankfurter (ECB EUR/USD reference rates, one request per year).
+- A SQLite cache at `data/research.db` with tables `bars(source, symbol, date, …)` and `fx`. Raw downloads are stored with source and fetch time.
+- `validate()` counts problem rows: non-positive prices, high < low, OHLC inconsistencies, >25 % daily jumps, and gaps over 7 days. `usable()` drops rows that can't be traded on.
+- `cross_check()` compares daily returns from Yahoo and Alpaca on overlapping days.
+- `load_panel()` builds per-strategy panels: adjusted OHLC (scaled by adjclose/close), USD converted to EUR at the ECB rate of the day, and proxy history stitched in before `native_from`.
+- `python -m tradebot data` refreshes everything and writes `reports/data_check_<date>.md`.
+
+**Findings:**
+
+| Finding | Consequence |
+|---|---|
+| **Stooq now blocks scripted downloads** with a JavaScript bot check. Getting around bot checks is off-limits. | Stooq dropped. **Yahoo is the research source for all history**, and [01 §6](01-platforms.md#6-market-data-us--eu-daily-bars) is updated. |
+| Alpaca's free historical data starts 2016-01-04 (the `iex` feed returns nothing that early; `sip` works). | Alpaca can't supply 2006–2015. It serves as the **independent cross-check** for the US names. |
+| Yahoo vs Alpaca, 8 US stocks, ~2,700 days each: return correlation 0.997–1.000. Only 4 of 21,568 stock-days differ by >0.5 %: MSFT on 2020-03-18/19 and XOM on 2020-03-12/13, crash days where one close differs for a day and then reverts. | Yahoo's US data is trustworthy. That's indirect evidence for its EU data, which has no free second source. |
+| `www.ecb.europa.eu` and `data-api.ecb.europa.eu` fail TLS verification from this machine ("unable to get local issuer certificate"), while other HTTPS sites work. | EUR/USD from **Frankfurter**, which republishes the ECB reference rates: 5,308 rates from 2005-12-30. |
+| Yahoo's Xetra history for the iShares ETFs is stale or wrong in the early years. SXR8/SXRV had 81–86 % zero-volume days in 2010. SXRV's 2010 prices sit ~30 % off its QQQ ratio (the −27.8 % "drop" on 2010-11-01 is a data error). EUNH had 76–99 % zero-volume days in 2009–2011. | A new instrument field `native_from`: own data is trusted from SXR8/SXRV 2014-01-01, EXW1 2009-01-01 and EUNH 2013-01-01. Before that the US twin (in EUR) is used. EUNH has no twin, so it **joins the universe in 2013**; stale prices would have faked near-zero volatility and oversized it. |
+| Proxy joins are smooth (−0.3 % to +2.1 % on the join day, normal daily moves). The largest daily moves are real (2008, 2020, NVDA earnings). | Panels accepted for backtesting. |
+
+**Coverage (EUR, adjusted):**
+- S1: SXR8/SXRV/EXW1/IS3N/4GLD from 2006 (with proxies), EUNH from 2013.
+- S2: 13 stocks from 2006, and META from its 2012 listing.
+
+**Known limitations:**
+- EU prices depend on one unofficial source. The paid upgrade (EODHD) needs owner approval ([08 §6](08-multi-agent-llm.md#6-cost)). The decision about a P1 runtime source is recorded in step 11.
+- FX uses the ECB 14:15 CET rate for US closes at 22:00 CET, an approximation that's fine for daily research.
+- Adjusted prices mean dividends are treated as reinvested, and taxes on them are ignored.
+
+**Tests (`tests/test_data.py`, 3):** proxy stitching in EUR is scaled to join exactly; `native_from` moves the join; validation flags a jump and a high < low row, and `usable()` drops the bad row.
+
+**Run:** `uv run python -m tradebot data` (≈1 min). Report: `reports/data_check_2026-09-25.md`.
+
+### Step 5: Indicators (`src/tradebot/indicators.py`)
+
+**Built:**
+- `sma`.
+- `rsi` and `atr`, both with Wilder smoothing: seeded with the mean of the first *n* values, then `avg = (avg·(n−1) + x) / n`.
+- `bollinger_lower` (population standard deviation, the Bollinger convention).
+- `volatility`: standard deviation of daily returns.
+
+**Decision:** Wilder smoothing is written as a short explicit loop instead of pandas `ewm(adjust=False)`. `ewm` seeds with the first value instead of an average, which makes RSI(2) differ from the textbook definition early in a series.
+
+**Tests (`tests/test_indicators.py`, 6):**
+- Hand-computed values: RSI(2) on 1,2,1,2,1 gives 50 / 75 / 37.5, and ATR gives 2.5 / 1.75.
+- Extremes: RSI is 100, 0 and 50 for rising, falling and flat series.
+- **A causality test:** for each indicator, the value at *t* on the full history equals the value at *t* on history cut off at *t*. That proves no indicator peeks into the future.
+
+### Step 6: Strategies (`src/tradebot/strategies.py`)
+
+**Built:**
+- **`S1Trend`**:
+  - Features: SMA(200), ATR(20), 20-day volatility, `in_trend`.
+  - `decide()` does nothing except on check days (last trading day of the month; weekly for the robustness test). On a check day it exits instruments that lost the trend, raises stops to close − 3×ATR (never lowers them), and enters new in-trend instruments with inverse-volatility weights.
+- **`S2Pullback`**:
+  - Features: SMA(200), RSI(2), SMA(5) exit, ATR(14), and `setup` = uptrend and (RSI(2) < 10 *or*, as a switch, close < lower Bollinger band).
+  - `decide()` exits on close > SMA(5) or after 10 bars. It enters the lowest-RSI setups into free slots (at most 3), counting slots that exits free up at the same open.
+
+**Decisions:**
+- **One code path for backtest and live** ([04 §1](04-architecture.md#1-principles)). `features()` is computed once over history, which is safe because indicators are causal (step 5). `decide()` is a pure function of the latest row per symbol, and live will call exactly the same two methods.
+- Each row carries `fresh`, meaning the symbol traded on that day. S2 only acts on fresh rows. S1 uses the latest row even on its exchange's holiday, so a month-end holiday doesn't skip a whole month.
+- Whether a day is a check day is a calendar question. The backtest answers it from the data's own dates; live answers it from the exchange calendar (P1).
+
+**Tests (`tests/test_strategies.py`, 8):** period-end detection; the S1 trend flag, inverse-volatility weights, no action on non-check days, exits, and stops only moving up; S2's setup firing on a sharp pullback in an uptrend, lowest-RSI ranking with a slot limit, a stale symbol ignored, exits on the bounce and the time stop, and slots freed by exits.
+
+### Step 7: Sizing (`src/tradebot/sizing.py`)
+
+**Built:**
+- `size_entry()`:
+  - S1 target = €600 budget × weight. S2 target = (0.5 % × capital) ÷ stop distance × price, i.e. €5 of risk at the €1,000 cap.
+  - Both are capped by the strategy's position cap (S1 €250, S2 €200), the global €250, and cash.
+  - Anything under €20 is skipped.
+- `make_intent()`: entries become DAY limit orders at close + 1 %, exits become market orders, and ids are deterministic.
+
+**Decision:** in a per-strategy backtest, "capital" is `€1,000 × strategy equity ÷ strategy budget`, capped at €1,000. Risk per trade therefore shrinks after losses, as `min(equity, cap)` does live.
+
+**Tests (`tests/test_sizing.py`, 5):** budget × weight; the caps; €5 risk ÷ €4 stop = 1.25 shares; halved capital halves risk; orders under the minimum are skipped; order types and deterministic ids.
+
+### Step 8: Simulated fills (`src/tradebot/sim.py`)
+
+**Built:**
+- Limit buy at the open: no fill if the open is above the limit, and slippage never pushes the price above the limit.
+- Market orders at the open, with slippage on both sides.
+- Stops: fill at the open if it gapped through the stop, otherwise at the stop, minus slippage.
+- FX fee on USD instruments.
+- `costs_for()` reads the cost model from settings, with a multiplier for 2× cost runs.
+
+**Decision:** the "≤ 1 % of daily volume" cap from [06 §2.2](06-backtesting.md#22-execution-model) is **not built**. At €1,000 it can never bind, and Yahoo's zero-volume days on early Xetra data would turn it into fake no-fills. Add it when position sizes grow.
+
+**Tests (`tests/test_sim.py`, 4):** limit fill, limit cap, gap-up no-fill; market slippage; intraday stop vs a gap through the stop; FX fee only on USD.
+
+### Step 10: Risk engine and kill switch (`src/tradebot/risk.py`), built before step 9
+
+**Built:**
+- `check(intent, state, limits)` runs the pre-trade checks of [05 §3](05-risk-and-safety.md#3-pre-trade-checks-in-order-the-first-failure-wins) in order, and the first failure wins: kill switch, known mode, whitelist, no shorting, duplicate intent, order rate, data freshness (bar ≤ 5 days old, covering weekends and holidays), price collar, then, for entries only, notional in [€20, €250], max positions, the €1,000 capital cap, the daily loss limit, and cash.
+- Exits skip the entry-only limits, because they reduce risk.
+- Every decision carries the limits hash.
+- Kill switch:
+  - `trip()` writes `data/KILL` before anything else and appends to `data/kill_log.jsonl`.
+  - `is_tripped()` re-reads the file, so the state survives restarts.
+  - `reset(who, why)` is the only way out and is logged.
+
+**Not yet:** check 3 (market open) needs the exchange calendar, and arrives with the live engine in P1.
+
+**Tests (`tests/test_risk.py`, 16):** a clean entry passes and is recorded; a repeat is rejected as a duplicate; **each** of the 13 rejection reasons has its own failing case; exits pass even with the daily loss hit, no cash and the cap exceeded; the kill switch blocks everything, survives a re-read, and resets with a log entry.
+
+### Step 9: Backtest engine, metrics, reports (`backtest.py`, `report.py`, `cli.py`)
+
+**Built:**
+- **`backtest.run()`**, an event-driven daily loop. For each symbol that traded that day:
+  1. Fill yesterday's orders at the open: exits first, then entries.
+  2. Check the protective stop.
+  3. Count bars held.
+
+  At the close, the day is marked to market and the strategy decides. Each entry is sized, becomes an intent, and passes through the **same** `risk.check()`. Approved orders queue for that symbol's next bar.
+- It records unfilled limits, rejections by reason, and the first date the kill switch *would* have tripped (drawdown ≥ 10 % of the strategy budget). The backtest keeps going after that date, so the full history stays visible.
+- The benchmark is the equal-weight universe, rebalanced daily, with no costs.
+- **`metrics()`**: CAGR, volatility, Sharpe ± its standard error (Lo 2002), Sortino, max drawdown and its longest duration, Calmar, exposure, trade statistics, costs as % of gross P&L, turnover, and correlation/beta to the benchmark.
+- **`report.write()`**: a markdown report following [06 §8](06-backtesting.md#8-backtest-report-template). It includes a chart (equity vs benchmark plus drawdown; the dataviz skill's reference palette, with a legend), 1× vs 2× costs, returns per year, trades by symbol and exit reason, top winners and losers, and a 1,000-reshuffle Monte Carlo of the drawdown.
+- **Trial log `data/trials.jsonl`**: every run, with parameters, period, metrics and a **code hash** (sha256 of source and config, since there are no git commits yet).
+- **CLI:**
+  - `backtest --strategy s1|s2 --period insample|holdout|recent|all [--param k=v]`
+  - `grid --strategy s1|s2`
+  - The **holdout guard** refuses without `--frozen` and refuses a second holdout run for the same strategy (both verified).
+
+**Bugs found and fixed while building:**
+
+| Bug | How it showed | Fix |
+|---|---|---|
+| Entries sized on the signal close could fill 1 % higher and exceed a cap (€202 vs €200) | Engine unit test | Size and risk-check entries at the worst-case price (the limit) |
+| The 2-orders-per-minute limit rejected the 3rd+ order of a day (129 rejections in S2, including exits) | Rejection counts in the first S2 report | In a backtest every order is sent in the same instant; live, the executor spaces orders ≥ 2 s apart. The backtest resets the per-minute counter per order; the per-day limit still applies. A regression test covers it. |
+| A run with `--param` overwrote the default report | Bollinger run replaced the S2 report | Report names include parameter overrides |
+
+The pre-fix runs stay in the trial log (the honest trial count) and are identifiable by their code hash.
+
+**Tests (`tests/test_backtest.py`, 4):**
+- A round trip: fill prices, the limit cap, exit at the next open, and **final equity = budget + Σ trade P&L**.
+- A stop filled at the stop minus slippage.
+- A gap above the limit leaves the entry unfilled.
+- Two same-day orders both pass under a 1-per-minute limit.
+
+**Performance:** one backtest (2007–2019, 6–14 symbols) takes 2–5 s, and the 81-cell S2 grid about 4 min.
+
+### Parameter freeze (recorded 2026-09-25, before any holdout run)
+
+**S1 is frozen at its pre-specified defaults:** `sma_n=200, check=M, atr_mult=3.0, atr_n=20, vol_n=20`. The in-sample grid showed a plateau for monthly checks (Sharpe 0.42–0.61), and the default sits inside it. Tighter stops (`atr_mult=2.0`) scored higher in-sample, but switching to the best cell after looking would be exactly the overfitting the method forbids. They stay a candidate for a future walk-forward test, not a change now.
+**S2 is not frozen: it failed in-sample** (details in step 11), so it gets no holdout run.
+
+### Step 11: Backtest results and the P0 gate
+
+All runs use code `0be3a594cfcb`, EUR, with the costs from `config/settings.toml`. Reports are in `reports/`.
+
+**S1 (trend filter, €600 budget):**
+
+| Period | CAGR (1× / 2× costs) | Sharpe ± SE | Max DD | Trades | Benchmark CAGR / max DD |
+|---|---|---|---|---|---|
+| In-sample 2007–2019 | +3.4 % / +2.9 % | 0.45 ± 0.29 | −12.4 % | 210 | +8.6 % / −40.3 % |
+| **Holdout 2020–2024 (run once)** | **+4.5 % / +3.8 %** | **0.71** | **−13.4 %** | 89 | +10.6 % / −24.0 % |
+| Recent 2025–2026-09 | +3.5 % / +2.7 % | 0.65 | −5.4 % | 27 | +16.2 % / −14.6 % |
+
+- **Grid (18 cells):** 17 of 18 cells are profitable after costs, and every monthly-check cell lands in Sharpe 0.42–0.61 (a plateau). Weekly checks with tight stops churn (Sharpe 0.03–0.47).
+- **Behaviour:** the protective stop makes 200 of 210 exits. After a stop, S1 waits for the next month-end check, so it's invested ~50 % of the time.
+- **Character:** it cut the worst drawdown by two thirds (2008: −2.8 % vs −29 %). In return it gave up over half of buy-and-hold's return in rising markets.
+- **Kill switch:** it would have tripped on 2009-06-23 and 2022-05-16, when drawdown reached 10 % of the budget. Live, that pauses trading for a human review each time: roughly once every 7 years.
+
+**S2 (pullback, €400 budget): FAILS.**
+
+| Run | CAGR (1× / 2× costs) | Sharpe | Max DD | Trades |
+|---|---|---|---|---|
+| Default (RSI(2) < 10), in-sample | −0.1 % / −6.0 % | 0.02 | −18.8 % | 935 |
+| Bollinger variant (the PRD's rule), in-sample | +0.1 % / −2.2 % | 0.04 | −12.5 % | 395 |
+| Grid, 81 cells | 35 of 81 profitable; median Sharpe −0.02, best 0.28 (≈ 1 standard error) | | | |
+
+**Why S2 fails:**
+- A small positive gross edge (~0.2 % per trade, a 61 % win rate) is fully eaten by costs: 110 % of gross P&L at 1×.
+- Trades last ~3.4 days on average, so the spread plus Trading 212's 0.3 % round-trip FX fee on US names outweighs the edge.
+- Holding longer (exit SMA 10) is the only area that's consistently better, and it's still weak. This matches the literature's warning that this edge has decayed since publication.
+
+**P0 gate ("Idea → Demo", [06 §7](06-backtesting.md#7-promotion-gates)) for S1:**
+
+| Criterion | Result |
+|---|---|
+| Backtest ≥ 10 years where data exists | ✅ 13 years in-sample (with proxies) + 5 years holdout |
+| Still positive at 2× costs | ✅ +2.9 % in-sample, +3.8 % holdout |
+| Holdout Sharpe ≥ ½ in-sample | ✅ 0.71 vs 0.45 |
+| Plateau in the robustness checks | ✅ monthly cells 0.42–0.61 |
+| Max drawdown acceptable vs benchmark | ✅ −12 % vs −40 %; −13 % vs −24 % |
+| Code unit-tested | ✅ 53 tests pass |
+| Code reviewed | ⏳ owner review |
+| Report filed | ✅ `reports/` |
+
+**Verdict:**
+- **S1 passes, so P0's exit gate ("at least one strategy") is met.**
+- **S2 fails and doesn't go to demo.**
+
+**Honest reading:**
+- S1's Sharpe of 0.45 ± 0.29 isn't statistically significant (t ≈ 1.6), and ~20 S1 trials were run, which weakens it further.
+- The robust, literature-backed property is **drawdown control**, not excess return. At €600, +3–4 % a year is €20–25 a year.
+- As planned, P1 checks the *implementation*, not the edge ([06 §4](06-backtesting.md#4-statistical-sanity)).
+
+**Decisions for the owner** (they affect P1–P2; my recommendations are in the summary to the owner):
+1. **S2's role.** Its signals still exist, and it was always going to be the LLM desk's test bed. Options: (a) keep S2 in **shadow only** (no demo orders), so the desk is tested on whether its news and earnings vetoes can turn a zero-edge strategy positive; (b) drop it and research a different single-stock family.
+2. **S2's €400 budget:** leave it unused, or give S1 the full €1,000 cap.
+3. **EU runtime data for P1:** Yahoo, the only working free EU source, for the demo phase with daily validation; or EODHD (~€20/month) now. Either way, a paid source before real money.
+
+### P0 summary
+
+| Step | Status |
+|---|---|
+| 1 Repository setup | ✅ |
+| 2 Data contracts | ✅ |
+| 3 Config with bounds | ✅ |
+| 4 Market data | ✅ (source changed: Stooq blocked → Yahoo, cross-checked against Alpaca) |
+| 5 Indicators | ✅ |
+| 6 Strategies | ✅ |
+| 7 Sizing | ✅ |
+| 8 Simulated fills | ✅ |
+| 9 Backtest, reports, trial log | ✅ |
+| 10 Risk engine, kill switch | ✅ (market-hours check in P1) |
+| 11 Backtests, grids, holdout | ✅ S1 passes the gate, S2 fails |
+
+53 tests, 11 modules, ~1,030 lines of code. Everything reproduces with: `uv sync`, `uv run python -m tradebot data`, `… backtest --strategy s1 --period insample`, `… grid --strategy s1`.
