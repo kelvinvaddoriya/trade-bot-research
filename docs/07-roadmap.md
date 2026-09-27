@@ -39,9 +39,10 @@ Most questions are answered by Trading 212's API docs ([01 §4.1](01-platforms.m
 | Client order reference for idempotency | **None.** Docs warn that repeated requests may create duplicates | ✅ documented → submit-once protocol ([04 §4](04-architecture.md#4-core-data-contracts-sketch)) |
 | API key permissions | Chosen at key creation; optional IP allow-list; no money-movement endpoints | ✅ documented → key split in [05 §9](05-risk-and-safety.md#9-secrets--access) |
 | Can API positions be closed by the API? | Yes. Positions opened manually reportedly can't be. | ✅ design: bot-only account |
-| Are limit/stop orders placed while the market is closed queued for the open? | Not documented | 🧪 adapter test: place after the close, check the status next morning |
-| Minimum fractional step per instrument | Instrument metadata endpoint | 🧪 adapter test: load metadata for all 20 whitelisted instruments; sizing rounds down to the step |
-| Ticker / ISIN mapping for the whitelist | Instrument metadata endpoint | 🧪 script generates `config/instruments.toml` from ISINs; review once by hand |
+| Are limit/stop orders placed while the market is closed queued for the open? | **Yes**: a DAY limit placed on a Saturday was accepted with status NEW | ✅ tested 2026-09-26 ([10](10-build-log.md#p1-preview-first-demo-order-on-trading-212-2026-09-26)) |
+| Minimum fractional step per instrument | Not in the metadata (`minTradeQuantity` absent); 4-decimal quantities are accepted (0.0348 SXR8) | ✅ partly: sizing rounds down to 4 decimals |
+| Ticker / ISIN mapping for the whitelist | `t212-map` → `config/t212_tickers.toml`, 20/20 (XOM's ISIN corrected) | ✅ done 2026-09-26 |
+| Final status of filled/cancelled orders | They leave the active list (404); the final status is in order history | ✅ handled in `wait_for()` |
 | Does demo behave like live? | Same API and order types | 🧪 re-run the adapter tests with live keys at the P3 gate (read-only calls plus one €20 order) |
 
 **Needs the owner** (account setup, which I can't do): create the Trading 212 practice account and a demo API key, and a free Alpaca account for US data and news (start of P0). The LLM provider keys come later, at the start of P2.

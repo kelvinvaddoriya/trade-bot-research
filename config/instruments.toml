@@ -131,7 +131,7 @@ alpaca = "JPM"
 
 [XOM]
 name = "Exxon Mobil"
-isin = "US30231G1022"
+isin = "US30233Q1085"     # per Trading 212 metadata (2026-09-26); older listings show US30231G1022
 market = "XNYS"
 currency = "USD"
 strategy = "s2_pullback"

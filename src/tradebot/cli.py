@@ -120,6 +120,114 @@ def cmd_grid(args) -> None:
     print(f"report: {path}")
 
 
+def _t212():
+    from .trading212 import Trading212
+    env = data.read_env()
+    return Trading212(env["T212_DEMO_API_KEY"], env["T212_DEMO_API_SECRET"])
+
+
+def cmd_t212_map(args) -> None:
+    from .trading212 import TICKERS, map_tickers, write_tickers
+    mapping = map_tickers(_t212().instruments(), load_instruments())
+    write_tickers(mapping)
+    missing = {s: m.get("candidates") for s, m in mapping.items() if not m["ticker"]}
+    print(f"mapped {len(mapping) - len(missing)}/{len(mapping)} instruments -> {TICKERS}")
+    for s, c in missing.items():
+        print(f"  unresolved {s}: candidates {c}")
+
+
+def cmd_demo_trade(args) -> None:
+    """Demo order through the real pipeline: risk check -> submit-once -> broker -> journal -> reconcile."""
+    import time
+
+    from . import risk
+    from .execution import fill_price, journal, submit_once, wait_for
+    from .models import OrderIntent, Signal, intent_id
+    from .sizing import ENTRY_LIMIT
+    from .trading212 import TICKERS, is_open, load_tickers, qty
+
+    inst, risk_cfg, sym = load_instruments(), load_risk(), args.symbol.upper()
+    if sym not in inst or inst[sym]["currency"] != "EUR":
+        sys.exit("demo supports the whitelisted EUR instruments (e.g. SXR8, SAP)")
+    if not TICKERS.exists():
+        cmd_t212_map(args)
+    tk = load_tickers()[sym]
+    ticker, t = tk["ticker"], _t212()
+
+    summ = t.summary()
+    avail = summ["cash"]["availableToTrade"]
+    print(f"account: DEMO, {summ['currency']}, available {avail:,.2f} (bot sizes against the €{risk_cfg['capital_cap_eur']} cap)")
+    open_now = is_open(t.exchanges(), tk["schedule"])
+    bars = data.fetch_yahoo(inst[sym]["yahoo"], str(dt.date.today() - dt.timedelta(days=14)))
+    close, bar_day = float(bars.iloc[-1]["close"]), bars.iloc[-1]["date"]
+    print(f"instrument: {sym} = {ticker} ({tk['name']}); market open now: {open_now}; last close {close:.2f} on {bar_day}")
+
+    positions, open_orders = t.positions(), t.orders()
+    if any(o.get("ticker") == ticker for o in open_orders):
+        sys.exit(f"there are already open orders for {ticker}: the bot's account must only hold its own orders")
+    held = {p.get("ticker") or p.get("instrument", {}).get("ticker"): p.get("quantity", 0) for p in positions}
+
+    if args.mode == "roundtrip" and not open_now:
+        sys.exit("market closed: the round trip needs an open market (Xetra 09:00-17:30 CET)")
+    limit = close * (1 - 0.015) if args.mode == "lifecycle" else close * (1 + ENTRY_LIMIT)
+    q = qty(args.eur / limit)
+    sig = Signal("demo", sym, "buy", "entry", dt.date.today(), f"manual demo ({args.mode})", close)
+    intent = OrderIntent(intent_id("demo", sym, "buy", dt.datetime.now()), sig, q, "limit", limit, q * limit)
+    st = risk.RiskState(mode="demo", day=dt.date.today(), cash_eur=min(avail, risk_cfg["capital_cap_eur"]),
+                        held_qty={sym: held.get(ticker, 0.0)}, last_bar={sym: bar_day}, last_close={sym: close})
+    dec = risk.check(intent, st, risk_cfg)
+    journal("RISK_DECISION", intent_id=intent.id, approved=dec.approved, reason=dec.reason, limits_hash=dec.limits_hash)
+    print(f"risk engine: {'APPROVED' if dec.approved else 'REJECTED: ' + dec.reason} "
+          f"(buy {q} x {ticker} limit {limit:.2f} = €{q * limit:.2f}, limits {dec.limits_hash})")
+    if not dec.approved:
+        return
+
+    def match(orders):
+        return next((o for o in orders if o.get("ticker") == ticker and abs(o.get("quantity", 0) - q) < 1e-6), None)
+
+    order = submit_once(t, intent.id, lambda: t.place_limit(ticker, q, limit, "DAY"), match)
+    if order is None:
+        sys.exit("order not found after two lookups: nothing resent (submit-once). Check the app.")
+    oid = order["id"]
+    time.sleep(2)
+    now = t.order(oid)
+    print(f"order {oid}: accepted by Trading 212, status {now.get('status')} "
+          f"({now.get('type')} {now.get('quantity')} @ {now.get('limitPrice')}, {now.get('timeInForce') or now.get('timeValidity')})")
+    journal("BROKER_STATUS", intent_id=intent.id, order_id=oid, status=now.get("status"))
+
+    if args.mode == "lifecycle":
+        t.cancel(oid)
+        final = wait_for(t, oid, ticker, {"CANCELLED"})
+        journal("CANCELLED", intent_id=intent.id, order_id=oid, status=final and final["status"],
+                filled=final and final.get("filledQuantity"))
+        print(f"order {oid}: cancel requested -> {final and final['status']} (filled {final and final.get('filledQuantity')})")
+    else:
+        final = wait_for(t, oid, ticker, timeout=120)
+        if not final or final.get("status") != "FILLED":
+            if final is None or final.get("status") not in ("CANCELLED", "REJECTED"):
+                t.cancel(oid)
+            sys.exit(f"entry not filled ({final and final.get('status')}): cancelled, nothing held")
+        fq, fpx = final["filledQuantity"], fill_price(final)
+        journal("FILLED", intent_id=intent.id, order_id=oid, qty=fq, price=fpx)
+        print(f"FILLED {fq} @ {fpx:.2f}")
+        stop = submit_once(t, intent.id + "-stop", lambda: t.place_stop(ticker, -fq, fpx * 0.97), match=lambda o: None)
+        print(f"protective stop {stop['id']} placed at {fpx * 0.97:.2f} (GTC)")
+        t.cancel(stop["id"])
+        wait_for(t, stop["id"], ticker, {"CANCELLED"})
+        sell = submit_once(t, intent.id + "-exit", lambda: t.place_market(ticker, -fq), match=lambda o: None)
+        done = wait_for(t, sell["id"], ticker, timeout=120)
+        journal("EXIT", intent_id=intent.id, order_id=sell["id"], status=done and done.get("status"))
+        print(f"closed: market sell {sell['id']} -> {done and done.get('status')}")
+
+    time.sleep(1)
+    left = [o for o in t.orders() if o.get("ticker") == ticker]
+    pos = {p.get("ticker") or p.get("instrument", {}).get("ticker"): p.get("quantity") for p in t.positions()}
+    ok = not left and pos.get(ticker, 0) == held.get(ticker, 0)
+    journal("RECONCILE", ticker=ticker, open_orders=len(left), position=pos.get(ticker, 0), ok=ok)
+    print(f"reconcile: open orders for {ticker}: {len(left)}, position: {pos.get(ticker, 0)} -> {'OK' if ok else 'MISMATCH'}")
+    print("journal: data/journal.jsonl")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(prog="tradebot")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -135,5 +243,13 @@ def main() -> None:
     g.add_argument("--strategy", required=True)
     g.add_argument("--param", action="append", help="fixed parameter for all combinations")
     g.set_defaults(fn=cmd_grid)
+    sub.add_parser("t212-map", help="map whitelisted instruments to Trading 212 tickers").set_defaults(fn=cmd_t212_map)
+    d = sub.add_parser("demo-trade", help="place a demo order on the Trading 212 PRACTICE account")
+    d.add_argument("--symbol", default="SXR8")
+    d.add_argument("--eur", type=float, default=25.0, help="order size in EUR (default 25)")
+    d.add_argument("--mode", default="lifecycle", choices=["lifecycle", "roundtrip"],
+                   help="lifecycle: place a limit below the market and cancel it (any time); "
+                        "roundtrip: buy, protective stop, sell (market must be open)")
+    d.set_defaults(fn=cmd_demo_trade)
     args = p.parse_args()
     args.fn(args)

@@ -297,8 +297,8 @@ TradeBot/
     desk.py                   context builder, news analyst, jury, aggregator, reporter
     llm_providers.py          anthropic / openai / google / openrouter adapters (~30 lines each)
     risk.py                   pre-trade checks, kill switch            [built P0]
-    brokers/     trading212.py                                         [P1]
-    execution.py              order manager, reconciler                [P1]
+    trading212.py             Trading 212 REST adapter (demo only)     [started: demo trade 2026-09-26]
+    execution.py              submit-once, journal, order polling      [started; reconciler in P1]
     backtest.py               historical daily loop + metrics          [built P0]
     live.py                   live clocks + loop
     store.py                  SQLite

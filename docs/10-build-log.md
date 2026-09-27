@@ -2,6 +2,54 @@
 
 One entry per backlog step ([07](07-roadmap.md)): what was built, decisions made, how to run it, and the results. Newest phase first; steps in order within a phase.
 
+## P1 preview: first demo order on Trading 212 (2026-09-26)
+
+The owner asked for a demo trade. It was built as the first slice of P1's broker adapter, running through the real pipeline: **risk check → submit-once → Trading 212 practice account → journal → reconcile**.
+
+**Built:**
+- `src/tradebot/trading212.py`: the REST adapter.
+  - **Refuses any base URL other than the demo.** Live needs the P3 arming.
+  - Basic auth; honours rate limits from the `x-ratelimit-remaining/-reset` headers per endpoint; safe single retry on HTTP 429, since nothing was executed.
+  - `Decimal` rounding at the boundary: quantity rounded down to 4 decimals, prices to cents.
+  - Read calls: summary, positions, orders, order, order history, instruments, exchanges.
+  - Order calls: limit, market, stop, cancel.
+  - Also `map_tickers()` and `is_open()`. `is_open()` reads the exchange schedule, where the latest event at or before now must be OPEN.
+- `src/tradebot/execution.py`:
+  - `journal()`: JSON lines in `data/journal.jsonl`. The SQLite journal replaces it in P1.
+  - `submit_once()`: the [04 §4](04-architecture.md#4-core-data-contracts-sketch) protocol. It sends once; a broker "no" (4xx) is final; a timeout or 5xx makes the order UNKNOWN, and it's looked for in open orders twice, 10 s apart, never resent.
+  - `wait_for()`, which falls back to order history when an order leaves the active list.
+- CLI:
+  - `t212-map` writes `config/t212_tickers.toml` (20 of 20 mapped).
+  - `demo-trade --symbol SXR8 --eur 25 --mode lifecycle|roundtrip`.
+
+**Run (2026-09-26, Saturday, market closed), `--mode lifecycle`:**
+
+| Step | Result |
+|---|---|
+| Account | Practice account, EUR, €5,000 available. The bot sizes against its €1,000 cap. |
+| Instrument | SXR8 → `SXR8d_EQ`; market open: no; last close €727.76 |
+| Risk engine | APPROVED: buy 0.0348 at limit €716.84 (1.5 % below the close, so it can't fill) = €24.95; limits hash `eff24a142253` |
+| Submit | Order `55600608984` accepted with status **NEW**, `DAY` validity |
+| Cancel | Final status **CANCELLED**, 0 filled (read from order history) |
+| Reconcile | No open orders, no position → **OK** |
+| Journal | RISK_DECISION → SUBMITTING → SUBMITTED → BROKER_STATUS → CANCELLED → RECONCILE |
+
+**Findings:**
+
+| Finding | Consequence |
+|---|---|
+| Ticker formats: Xetra `XXXXd_EQ`, US `XXXX_US_EQ`; META is still `FB_US_EQ` | Mapping file generated from the ISINs |
+| **Exxon's ISIN in Trading 212 is US30233Q1085**, not the older US30231G1022 in our config | Config corrected. This is exactly why ISINs are confirmed against broker metadata. |
+| **Limit orders placed while the market is closed are accepted and queued** (status NEW) | The P1 adapter-test question is answered ✅ |
+| A cancelled (or filled) order **disappears from the active list** (HTTP 404) instead of showing a final status | First run logged "NOT_ACTIVE". **Fixed:** `wait_for()` reads the final status from history. Without this, the round trip would have mistaken a *fill* for a failure and left a position open. A test covers it. |
+| US stocks also trade in EUR on a German venue (e.g. Apple as `APCd_EQ`) | Possible way around the 0.15 % FX fee for S2-type strategies (spreads to check) |
+| **Yahoo's Friday bar for SXR8.DE still had no close on Saturday** (open and volume present) | Invalid rows are dropped, so decisions would quietly use Thursday's close, and the "bar ≤ 5 days old" freshness check wouldn't notice. **P1 change:** freshness must require the bar for the exchange's last completed session (from Trading 212's schedule). This also strengthens the case for a paid EU data source. |
+| Rate-limit headers: account summary allows 1 per 5 s; `x-ratelimit-reset` is a Unix timestamp | The adapter waits accordingly |
+
+**Tests (`tests/test_trading212.py`, 8):** the live URL is refused; quantities round down; ticker mapping by ISIN, currency and venue; `is_open` across a session; submit-once finds a timed-out order without resending, gives up after two empty lookups, and treats a broker rejection as final; `wait_for` reads history so a fill isn't mistaken for a cancel. 61 tests in total.
+
+**Next (needs an open market):** `uv run python -m tradebot demo-trade --symbol SXR8 --eur 25 --mode roundtrip`, during Xetra hours (09:00–17:30 CET). It buys ~€25 with a marketable limit at close + 1 %, places a GTC protective stop 3 % below the fill, then cancels the stop, sells at market, and reconciles to flat. These steps haven't yet run against Trading 212 with a real fill.
+
 ## P0: Foundations & backtest (started 2026-09-25)
 
 ### Step 1: Repository setup
