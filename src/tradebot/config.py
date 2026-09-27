@@ -29,7 +29,8 @@ class ConfigError(Exception):
 
 def _load(path: Path) -> tuple[dict, str]:
     raw = path.read_bytes()
-    return tomllib.loads(raw.decode("utf-8")), hashlib.sha256(raw).hexdigest()[:12]
+    # hash the content, not the checkout: git on Windows may rewrite line endings (docs/10, P1)
+    return tomllib.loads(raw.decode("utf-8")), hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest()[:12]
 
 
 def load_risk(path: Path = CONFIG_DIR / "risk.toml") -> dict:

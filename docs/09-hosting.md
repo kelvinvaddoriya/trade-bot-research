@@ -56,6 +56,8 @@ Measured on 2026-09-24: Intel Core i5-7200U (2 cores / 4 threads, a 2016 laptop 
 
 ## 6. Laptop checklist (P0–P2)
 
+`ops/install-tasks.ps1` automates the power plan, hourly time sync, the Task Scheduler entries (engine at boot with restart on failure, watchdog every minute, nightly backup to `C:\TradeBotBackup`) and starts the engine. Run it once in an elevated PowerShell. The other items are manual.
+
 - [ ] Plugged in; never sleep on AC; lid closed → do nothing; hibernate off; battery charge limit on if available.
 - [ ] Windows Update: set active hours; patch manually at the weekend if needed.
 - [ ] Task Scheduler: engine starts at boot (whether or not a user is logged on) and restarts on failure; watchdog every minute.
@@ -63,7 +65,8 @@ Measured on 2026-09-24: Intel Core i5-7200U (2 cores / 4 threads, a 2016 laptop 
 - [ ] Project and `data/` on D: (22 GB free is plenty); nightly copy of `data/` to C: or cloud storage.
 - [ ] Ethernet rather than Wi-Fi if possible.
 - [ ] A separate Windows user for the bot; **demo keys only**; disk encryption if the edition supports it.
-- [ ] Dead-man's switch check created; test alert received.
+- [ ] Dead-man's switch check created (healthchecks.io, period 10 min, grace 10 min, URL in `.env` as `HC_PING_URL`); test alert received.
+- [ ] Telegram bot created (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` in `.env`); test alert received.
 
 ## 7. VPS checklist (P3)
 

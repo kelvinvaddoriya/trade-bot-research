@@ -1,6 +1,6 @@
 import pytest
 
-from tradebot.config import ConfigError, load_instruments, load_risk, load_settings
+from tradebot.config import CONFIG_DIR, ConfigError, load_instruments, load_risk, load_settings
 
 
 def test_shipped_config_loads():
@@ -47,3 +47,12 @@ def test_hash_changes_with_content(tmp_path):
     h1 = load_risk(path)["hash"]
     path.write_text(RISK.replace("max_positions = 9", "max_positions = 8"), encoding="utf-8")
     assert load_risk(path)["hash"] != h1
+
+
+def test_hash_ignores_line_endings(tmp_path):
+    """git on Windows may check risk.toml out with CRLF; the limits hash must not change with it."""
+    src = (CONFIG_DIR / "risk.toml").read_bytes().replace(b"\r\n", b"\n")
+    lf, crlf = tmp_path / "lf.toml", tmp_path / "crlf.toml"
+    lf.write_bytes(src)
+    crlf.write_bytes(src.replace(b"\n", b"\r\n"))
+    assert load_risk(lf)["hash"] == load_risk(crlf)["hash"] == "eff24a142253"

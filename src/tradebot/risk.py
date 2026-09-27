@@ -1,6 +1,7 @@
 """Pre-trade checks and the kill switch (docs/05 §3–4). Only check() approves orders.
 
-Check 3 (market open, from the exchange calendar) arrives with the live engine in P1.
+The kill switch is a file, re-read on every check, so it survives restarts and other processes (watchdog, CLI)
+can trip it. Backtests (mode "backtest") don't consult it.
 """
 import datetime as dt
 import json
@@ -29,14 +30,17 @@ class RiskState:
     daily_loss_hit: bool = False
     last_bar: dict[str, dt.date] = field(default_factory=dict)
     last_close: dict[str, float] = field(default_factory=dict)
+    tradable: set[str] | None = None        # live: symbols whose market has a next session; None = not checked
 
 
-def _failure(o: OrderIntent, st: RiskState, r: dict, kill_file: Path | None) -> str | None:
+def _failure(o: OrderIntent, st: RiskState, r: dict) -> str | None:
     sym, entry = o.signal.symbol, o.signal.kind == "entry"
-    if kill_file is not None and is_tripped(kill_file):
+    if st.mode != "backtest" and is_tripped():
         return "kill switch tripped"                                        # 1
     if st.mode not in MODES:
         return f"unknown mode {st.mode}"                                    # 2
+    if st.tradable is not None and sym not in st.tradable:
+        return "market has no next session"                                 # 3
     if sym not in r["whitelist"]:
         return "not on whitelist"                                           # 4
     if o.signal.side == "sell" and o.qty > st.held_qty.get(sym, 0.0) + 1e-9:
@@ -65,8 +69,8 @@ def _failure(o: OrderIntent, st: RiskState, r: dict, kill_file: Path | None) -> 
     return None
 
 
-def check(o: OrderIntent, st: RiskState, risk: dict, kill_file: Path | None = KILL_FILE) -> RiskDecision:
-    reason = _failure(o, st, risk, kill_file)
+def check(o: OrderIntent, st: RiskState, risk: dict) -> RiskDecision:
+    reason = _failure(o, st, risk)
     if reason is None:
         st.seen_ids.add(o.id)
         st.orders_today += 1
@@ -82,18 +86,26 @@ def _log(record: dict, log: Path) -> None:
         f.write(json.dumps(record) + "\n")
 
 
-def trip(reason: str, by: str = "engine", path: Path = KILL_FILE, log: Path = KILL_LOG) -> None:
+def trip(reason: str, by: str = "engine", path: Path | None = None, log: Path | None = None) -> None:
+    path, log = path or KILL_FILE, log or KILL_LOG
     record = {"tripped": True, "reason": reason, "by": by, "ts": dt.datetime.now(dt.UTC).isoformat(timespec="seconds")}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record), encoding="utf-8")        # persist before anything else
     _log(record, log)
 
 
-def is_tripped(path: Path = KILL_FILE) -> bool:
+def is_tripped(path: Path | None = None) -> bool:
+    path = path or KILL_FILE
     return path.exists() and json.loads(path.read_text(encoding="utf-8")).get("tripped", False)
 
 
-def reset(who: str, why: str, path: Path = KILL_FILE, log: Path = KILL_LOG) -> None:
+def state(path: Path | None = None) -> dict:
+    path = path or KILL_FILE
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {"tripped": False}
+
+
+def reset(who: str, why: str, path: Path | None = None, log: Path | None = None) -> None:
+    path, log = path or KILL_FILE, log or KILL_LOG
     if path.exists():
         path.unlink()
     _log({"tripped": False, "reset_by": who, "why": why, "ts": dt.datetime.now(dt.UTC).isoformat(timespec="seconds")}, log)

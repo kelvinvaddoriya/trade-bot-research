@@ -1,10 +1,9 @@
 import datetime as dt
-import urllib.error
 
 import pytest
 
 from tradebot import execution
-from tradebot.trading212 import DEMO, T212Error, Trading212, is_open, map_tickers, qty
+from tradebot.trading212 import DEMO, T212Error, Trading212, current, last_closed, map_tickers, next_after, qty, sessions
 
 META = [
     {"ticker": "SXR8d_EQ", "isin": "IE00B5BMR087", "currencyCode": "EUR", "name": "S&P", "type": "ETF", "workingScheduleId": 166},
@@ -34,48 +33,20 @@ def test_ticker_mapping_by_isin_currency_and_venue():
     assert m["XXX"]["ticker"] == ""
 
 
-def test_is_open_uses_the_latest_event():
-    ex = [{"workingSchedules": [{"id": 166, "timeEvents": [
-        {"date": "2026-09-25T07:00:03.000Z", "type": "OPEN"}, {"date": "2026-09-25T15:30:00.000Z", "type": "CLOSE"}]}]}]
-    t = lambda h, m: dt.datetime(2026, 9, 25, h, m, tzinfo=dt.UTC)
-    assert is_open(ex, 166, t(10, 0)) and not is_open(ex, 166, t(16, 0)) and not is_open(ex, 166, t(6, 0))
-    assert not is_open(ex, 999, t(10, 0))
-
-
-class FakeBroker:
-    def __init__(self, open_orders):
-        self.open_orders, self.lookups = open_orders, 0
-
-    def orders(self):
-        self.lookups += 1
-        return self.open_orders
-
-
-@pytest.fixture(autouse=True)
-def tmp_journal(tmp_path, monkeypatch):
-    monkeypatch.setattr(execution, "JOURNAL", tmp_path / "journal.jsonl")
-
-
-def test_submit_once_timeout_finds_the_order_without_resending():
-    sent = []
-
-    def place():
-        sent.append(1)
-        raise urllib.error.URLError("timed out")
-
-    b = FakeBroker([{"id": 7, "ticker": "SXR8d_EQ", "quantity": 0.04, "status": "NEW"}])
-    o = execution.submit_once(b, "i1", place, lambda os: next(iter(os), None), log=lambda *_: None, pause=0)
-    assert o["id"] == 7 and len(sent) == 1
-    assert [e for e in ("SUBMITTING", "UNKNOWN", "SUBMITTED") if e in execution.JOURNAL.read_text()] == ["SUBMITTING", "UNKNOWN", "SUBMITTED"]
-
-
-def test_submit_once_gives_up_after_two_empty_lookups():
-    def place():
-        raise TimeoutError()
-
-    b = FakeBroker([])
-    assert execution.submit_once(b, "i2", place, lambda os: None, log=lambda *_: None, pause=0) is None
-    assert b.lookups == 2 and "NOT_FOUND" in execution.JOURNAL.read_text()
+def test_sessions_calendar_from_the_broker_schedule():
+    ex = [{"workingSchedules": [
+        {"id": 166, "timeEvents": [{"date": "2026-09-29T07:00:03.000Z", "type": "OPEN"}, {"date": "2026-09-29T15:30:00.000Z", "type": "CLOSE"},
+                                   {"date": "2026-09-30T07:00:03.000Z", "type": "OPEN"}, {"date": "2026-09-30T15:30:00.000Z", "type": "CLOSE"},
+                                   {"date": "2026-10-01T07:00:03.000Z", "type": "OPEN"}, {"date": "2026-10-01T15:30:00.000Z", "type": "CLOSE"}]},
+        {"id": 56, "timeEvents": [{"date": "2026-09-30T08:00:00.000Z", "type": "PRE_MARKET_OPEN"}, {"date": "2026-09-30T13:30:00.000Z", "type": "OPEN"},
+                                  {"date": "2026-09-30T20:00:00.000Z", "type": "AFTER_HOURS_OPEN"}]}]}]
+    t = lambda d, h, m=0: dt.datetime(2026, 9, d, h, m, tzinfo=dt.UTC)
+    xetra, nyse = sessions(ex, 166), sessions(ex, 56)
+    assert len(xetra) == 3 and nyse == [(t(30, 13, 30), t(30, 20))]            # the US regular session ends at after-hours
+    assert current(xetra, t(30, 10)) == xetra[1] and current(xetra, t(30, 16)) is None
+    assert last_closed(xetra, t(30, 16)) == xetra[1] and last_closed(xetra, t(29, 6)) is None
+    assert next_after(xetra, t(30, 16)) == xetra[2] and next_after(xetra, xetra[2][0]) is None
+    assert sessions(ex, 999) == []
 
 
 class LeavingOrder:
@@ -88,15 +59,40 @@ class LeavingOrder:
         return {"id": oid, "status": "FILLED", "filledQuantity": 0.04, "filledValue": 29.0}
 
 
-def test_wait_for_reads_history_so_a_fill_is_not_mistaken_for_a_cancel():
-    o = execution.wait_for(LeavingOrder(), 9, "SXR8d_EQ", timeout=1)
+def test_wait_final_reads_history_so_a_fill_is_not_mistaken_for_a_cancel():
+    o = execution.wait_final(LeavingOrder(), "SXR8d_EQ", 9, timeout=1)
     assert o["status"] == "FILLED" and execution.fill_price(o) == pytest.approx(725.0)
 
 
-def test_submit_once_broker_rejection_is_final():
-    def place():
-        raise T212Error(400, "bad quantity")
+def test_rate_limit_rejections_are_retried(monkeypatch):
+    """HTTP 429 means nothing was executed, so even an order POST is retried (up to 3 times); other errors are not."""
+    import io
+    import urllib.error
+    import urllib.request
 
+    replies = [429, 429, 200]
+
+    class Reply:
+        headers = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b'{"id": 1}'
+
+    def urlopen(req, timeout):
+        code = replies.pop(0)
+        if code != 200:
+            raise urllib.error.HTTPError(req.full_url, code, "x", {"retry-after": "1"}, io.BytesIO(b"too many requests"))
+        return Reply()
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    assert Trading212("k", "s").place_limit("SXR8d_EQ", 0.1, 700) == {"id": 1} and not replies
+    replies[:] = [400]
     with pytest.raises(T212Error):
-        execution.submit_once(FakeBroker([]), "i3", place, lambda os: None, log=lambda *_: None, pause=0)
-    assert "BROKER_REJECTED" in execution.JOURNAL.read_text()
+        Trading212("k", "s").place_limit("SXR8d_EQ", 0.1, 700)

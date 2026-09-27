@@ -52,7 +52,9 @@ def read_env() -> dict:
 
 # ---------- downloads ----------
 
-def fetch_yahoo(sym: str, start: str) -> pd.DataFrame:
+def fetch_yahoo(sym: str, start: str, through: dt.date | None = None) -> pd.DataFrame:
+    """Daily bars from `start`. `through` is the last completed session (live); by default today's bar is
+    dropped because it may still be forming."""
     p1 = int(dt.datetime.fromisoformat(start).replace(tzinfo=dt.UTC).timestamp())
     res = http_json(YAHOO.format(sym=urllib.parse.quote(sym), p1=p1, p2=int(time.time())))["chart"]["result"][0]
     offset = res["meta"].get("gmtoffset", 0)
@@ -62,8 +64,7 @@ def fetch_yahoo(sym: str, start: str) -> pd.DataFrame:
         "open": q["open"], "high": q["high"], "low": q["low"], "close": q["close"],
         "adjclose": res["indicators"]["adjclose"][0]["adjclose"], "volume": q["volume"],
     })
-    today = dt.datetime.now(dt.UTC).date()
-    df = df[df["date"] < today]                       # drop today's still-forming bar
+    df = df[df["date"] <= through] if through else df[df["date"] < dt.datetime.now(dt.UTC).date()]
     return df.drop_duplicates("date", keep="last").dropna(subset=["open", "high", "low", "close", "adjclose"])
 
 
@@ -193,6 +194,18 @@ def update(instruments: dict, start: str, log=print) -> dict:
             log(f"alpaca {sym}: {len(df)} bars; cross-check {results['cross_check'][sym]}")
     con.close()
     return results
+
+
+def refresh(instruments: dict, through: dt.date, start: str, log=print) -> None:
+    """Runtime update for the live engine: each instrument's full Yahoo history up to the session that just closed.
+    Full history, not just recent days, because a dividend changes the adjusted close of every earlier bar.
+    Proxies aren't refreshed: they only fill years long past, and the stitch rescales them anyway."""
+    con = connect()
+    for inst in instruments.values():
+        save_bars(con, fetch_yahoo(inst["yahoo"], start, through), "yahoo", inst["yahoo"], inst["currency"])
+        time.sleep(0.5)
+    con.close()
+    log(f"refreshed {len(instruments)} instruments through {through}")
 
 
 # ---------- panels ----------

@@ -96,12 +96,14 @@ sequenceDiagram
 
 | Time | Action |
 |---|---|
-| ~09:15 | Check fills of EU orders from the open (09:00); place stops |
-| ~15:45 | Check fills of US orders from the open (15:30); place stops |
-| ~17:45 | EU cycle after the Xetra close (17:30) |
-| ~22:30 | US cycle after the US close (22:00); daily report |
+| ~09:02 (Xetra open + 2 min) | Send the orders decided at the last close: exits first (each cancels its lot's stop, then sells at market), then entries. As fills arrive, place GTC protective stops |
+| Every 2 min in session, every 10 min outside | Sync: mirror orders and fills into the ledger, reconcile, keep stops right, ping the dead-man's switch |
+| ~17:50 (Xetra close + 20 min) | EU decision cycle (S1): fresh bars, signals, sizing, risk checks; orders planned for the next open |
+| ~22:30 (US close + 30 min) | Daily report, with the forward check and the S2 shadow book |
 
-**Order style:** entries are DAY **limit** orders at the last close + 1 % (buys), so a big gap up means no fill instead of a bad fill. Exits are DAY market orders at the next open. Stops follow each fill. Whether Trading 212 queues orders placed outside market hours, and whether stops can be GTC, gets confirmed in demo ([01 §4.1](01-platforms.md#41-trading-212-primary-venue)). If stops are DAY-only, the fill-check runs re-place them every session.
+The sessions come from Trading 212's exchange schedules, so holidays, half days and daylight-saving changes need no code. S2 runs in shadow only (owner decision, [10](10-build-log.md#p1-shadow--demo-engine-built-2026-09-27)), so P1 has no US cycle.
+
+**Order style (P1, 2026-09-27):** decisions are made after the close, and the orders go out 2 minutes after the next open. Entries are DAY **limit** orders at the last close + 1 %, so a gap up of more than 1 % leaves the order resting unfilled instead of paying up. Exits are market orders, sent after the lot's stop is cancelled. Protective stops are GTC; the engine places or replaces them (cancel, then place) only while the market is open, so a trail decided at the close takes effect at the next open. Trading 212 does queue orders placed while the market is closed, but sending at the open means nothing except stops rests at the broker overnight, a crash between close and open leaves nothing half-sent, and a kill switch at night has no queued entries to chase. One difference from the backtest remains: an entry that doesn't fill at the open keeps resting for the rest of the day, while the backtest counts it as unfilled.
 
 ## 4. Core data contracts (sketch)
 
@@ -209,14 +211,13 @@ SQLite, one file per environment (`data/demo.db`, `data/live.db`), in WAL mode.
 | Table | Content |
 |---|---|
 | `events` | Append-only journal: `id, ts, type, entity_id, payload_json`. Records every signal, review, risk decision, approval, broker event and kill-switch change. |
-| `bars` | Cached OHLCV with `source`, `adjusted`, and `proxy_for` (UCITS backtest proxies) |
-| `orders` | Current state of each order (derived from events) |
-| `fills` | Executions, including fees and FX fees |
-| `lots` | Position lots per strategy (entry fill, stop order id, exit fill) |
-| `equity` | Daily equity and cash snapshots from the broker |
+| `orders` | The ledger's view of each order: PENDING (planned at a close), SUBMITTING/UNKNOWN (submit-once), then the broker's id, status, filled quantity and average fill price |
+| `lots` | One lot per entry fill: quantity, entry price, stop price, exit, realised P&L |
+
+Built in P1 (`store.py`). Bars stay in the research cache `data/research.db`, shared with the backtests. Fills are fields on the order rows plus `FILL` events, and equity marks are `EQUITY` events (equity, peak, day change), so neither needs its own table.
 | `llm_calls` | Per call: seat, provider, model, request, response, tokens, cost, latency |
 
-Backups: a nightly copy of the database file, plus a daily JSONL export of the journal (also used as tax records).
+Backups: a nightly copy of the database file with SQLite's backup API (a scheduled task from `ops/install-tasks.ps1`). A daily JSONL export of the journal, which doubles as tax records, arrives with real money (P3).
 
 ## 8. Configuration
 
@@ -267,15 +268,17 @@ Invoked as `python -m tradebot <command>`.
 | Command | Does |
 |---|---|
 | `backtest --strategy s2 --from 2010-01-01 --to 2019-12-31` | Runs a backtest and writes its report |
-| `run` | Starts the engine loop in the configured mode |
-| `status` | Shows mode, kill switch, positions, open orders, last heartbeat, today's P&L and month-to-date LLM spend |
-| `kill --reason "..."` | Trips the kill switch (HALT) |
-| `kill --flatten --reason "..."` | Trips the kill switch and closes all positions |
-| `reset-kill` | Interactive: shows why it tripped, requires typed confirmation, logs the reset |
-| `approve <id>` / `decline <id>` | Human gate from the terminal (Telegram buttons arrive in P3) |
-| `reconcile` | Runs reconciliation on demand |
-| `desk-eval` | Runs the offline desk eval set ([08 §7](08-multi-agent-llm.md#7-evaluation)) |
-| `report --date ...` | Regenerates a daily report |
+| `run` | Starts the engine loop. Refuses unless `mode = "demo"`, the limits pass their bounds, the clock is within 2 s of the broker's, and no other engine has a fresh heartbeat |
+| `stop` | Asks the running engine to exit cleanly within 20 s (the watchdog then leaves it alone) |
+| `watchdog` | One watchdog check; Task Scheduler runs it every minute |
+| `status` | Shows mode, kill switch, heartbeat, last reconciliation, equity, cycle and report, open lots, open or pending orders, recent alerts |
+| `kill --reason "..."` | Trips the kill switch (HALT): cancels entry orders, keeps stops |
+| `kill --flatten --reason "..."` | Also plans a market exit for every lot at the next open |
+| `reset-kill --who ... --reason ...` | Shows why it tripped and the last reconciliation, requires typing `RESET`, logs the reset. The engine reconciles again before it trades. |
+| `reconcile` | Runs reconciliation on demand (engine stopped; a running engine reconciles every sync) |
+| `report` | Writes the daily report for the last US session now |
+| `approve <id>` / `decline <id>` | Human gate from the terminal (P3; Telegram buttons too) |
+| `desk-eval` | Runs the offline desk eval set (P2, [08 §7](08-multi-agent-llm.md#7-evaluation)) |
 
 ## 10. Repository layout
 
@@ -297,14 +300,14 @@ TradeBot/
     desk.py                   context builder, news analyst, jury, aggregator, reporter
     llm_providers.py          anthropic / openai / google / openrouter adapters (~30 lines each)
     risk.py                   pre-trade checks, kill switch            [built P0]
-    trading212.py             Trading 212 REST adapter (demo only)     [started: demo trade 2026-09-26]
-    execution.py              submit-once, journal, order polling      [started; reconciler in P1]
+    trading212.py             Trading 212 REST adapter (demo only), calendar from its schedules  [built P1]
+    execution.py              order manager: submit-once, fills → lots, stops, reconciler, HALT  [built P1]
     backtest.py               historical daily loop + metrics          [built P0]
-    live.py                   live clocks + loop
-    store.py                  SQLite
-    notify.py                 console / Telegram / dead-man's ping
-    watchdog.py               separate process entry point
+    live.py                   engine loop, decision cycles, heartbeat, watchdog check, daily report  [built P1]
+    store.py                  SQLite journal and ledger                [built P1]
+    notify.py                 console / Telegram / dead-man's ping     [built P1]
     cli.py
+  ops/install-tasks.ps1       laptop setup: power plan, time sync, Task Scheduler (engine, watchdog, backup)
   tests/
   data/                       db files, cached bars, trial log (git-ignored)
   reports/                    backtest and daily reports
@@ -319,15 +322,15 @@ Modules start flat. Split one only once it grows past a few hundred lines.
 | Language | Python 3.13 (3.12+) | Ecosystem: pandas, provider SDKs |
 | Environment / deps | `uv`, lockfile with hashes | Reproducible installs; supply-chain hygiene |
 | Data frames | `pandas`, `numpy` | Each indicator is a few lines, so no TA library |
-| Broker | Trading 212 REST via `httpx` | No official SDK; the adapter is small |
+| Broker | Trading 212 REST via standard-library `urllib` | No official SDK; the adapter is small, and `urllib` is one dependency fewer than `httpx` |
 | Market data | Standard-library `urllib`: Yahoo chart API, Alpaca REST, Frankfurter (ECB FX) | Free, no SDKs; upgrade path in [01 §6](01-platforms.md#6-market-data-us--eu-daily-bars) |
 | LLMs | `anthropic`, `openai` (also used for OpenRouter), `google-genai`, `pydantic` | Native SDKs with structured outputs. **No LiteLLM** (supply-chain compromise, March 2026) |
 | Storage | `sqlite3` (stdlib) | Zero operations work; plenty for daily bars |
 | Config | `tomllib` (stdlib) | Read-only config |
 | CLI | `argparse` (stdlib) | — |
-| Calendars | `exchange_calendars` (XETR, XNYS) | Holidays and half days |
+| Calendars | Trading 212's exchange schedules (`/equity/metadata/exchanges`) | Every session about three weeks back and ahead, holidays and half days included, from the venue itself. One dependency fewer than `exchange_calendars`, which was the original plan. |
 | Scheduling | Simple loop + OS scheduler for restarts (Task Scheduler now, systemd on a VPS) | No APScheduler, no Celery |
-| Notifications | Telegram Bot API via `httpx`; healthchecks.io pings | Mobile alerts and approvals; external dead-man's switch |
+| Notifications | Telegram Bot API and healthchecks.io pings via `urllib` | Mobile alerts and approvals; external dead-man's switch |
 | Secrets | Git-ignored `.env` for demo keys on the laptop; systemd credentials on the VPS for live keys | `.env` is never committed and never holds live keys |
 | Tests | `pytest` | — |
 | Backtest engine | Our own minimal event-driven engine for daily bars | Guarantees backtest and live run the same code |

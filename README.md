@@ -2,7 +2,7 @@
 
 Research prototype of a guarded, automated trading agent. Deterministic strategies propose trades. A multi-agent LLM desk (five models from five labs, paid and open-source) can only shrink or veto them, by majority. An independent risk engine gates every order, and a broker adapter executes. Everything runs on demo money first, capped at €1,000; real money is allowed only behind explicit gates.
 
-> **Status (2026-09-25):** **P0 complete**: data pipeline, strategies, risk engine and backtester are built, with 53 tests. S1 (trend filter) passed its backtest gate; S2 (pullback) failed after costs. Details in the [build log](docs/10-build-log.md).
+> **Status (2026-09-27):** **P1 built**: the demo engine (order manager with submit-once, reconciler, protective stops, kill switch, watchdog, alerts, daily report) runs S1 on the Trading 212 practice account, with S2 in shadow. 81 tests; drills 1, 2, 3, 5 and 6 passed against the demo account. Next: the 2-week unattended run. P0: S1 passed its backtest gate, S2 failed after costs. Details in the [build log](docs/10-build-log.md).
 > **Not investment advice.** This is a research and engineering project. Evidence (e.g. Barber & Odean 2000) shows that active retail traders tend to underperform passive investing after costs. We judge the prototype on engineering quality and honest measurement. We promise no returns.
 
 ## Owner decisions (2026-09-24)
@@ -31,6 +31,7 @@ Research prototype of a guarded, automated trading agent. Deterministic strategi
 | 10 | [Build log](docs/10-build-log.md) | What was built, step by step: decisions, findings, bugs, results |
 
 **Run it:** `uv sync` · `uv run pytest` · `uv run python -m tradebot data` · `uv run python -m tradebot backtest --strategy s1 --period insample` · `uv run python -m tradebot grid --strategy s1`. Reports land in `reports/`.
+**Demo engine:** `ops/install-tasks.ps1` (once, elevated) runs it 24/7 · `uv run python -m tradebot status` · `… stop` · `… kill --reason "..."` · `… reset-kill --who me --reason "..."`. Daily reports land in `reports/daily/`.
 | — | [PRD-TRADE-BOT.md](PRD-TRADE-BOT.md) | The original ChatGPT-drafted PRD. **Reference only.** Where the docs above differ, they win. |
 
 ## The system in one picture

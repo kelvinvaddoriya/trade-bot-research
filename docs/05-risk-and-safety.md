@@ -62,7 +62,7 @@ Every result, pass or fail with a reason code, is journaled together with the `l
 
 - Automatic: drawdown limit; 3 broker rejects in a row; reconciliation mismatch; an unknown order state still unresolved after one cycle; a data sanity failure on a held symbol; any exception inside the risk engine itself.
 - Manual: `tradebot kill` (CLI) or `/kill` in Telegram.
-- Watchdog: heartbeat older than 2 × the cycle interval (engine hung or dead).
+- Watchdog: heartbeat older than 60 s (engine dead), or no loop progress for 10 minutes (engine hung).
 
 **What HALT (the default) does**
 
@@ -80,7 +80,7 @@ Every result, pass or fail with a reason code, is journaled together with the `l
 
 ## 5. Watchdog
 
-The watchdog is a separate process (run by Task Scheduler every minute, or as a service). It reads the engine's heartbeat, a timestamp file the engine writes every loop iteration and at least every 60 s while idle. If the heartbeat is stale, the watchdog trips the kill switch (HALT) through its own broker session and sends an alert. Its broker key only needs to read and cancel orders. If the venue can't limit key permissions, it uses the same key, but the watchdog code only ever calls read and cancel.
+The watchdog is a separate process (run by Task Scheduler every minute, or as a service). It reads the engine's heartbeat (`data/heartbeat.json`), which a thread in the engine rewrites every 15 s as long as the main loop has made progress in the last 10 minutes. A heartbeat older than 60 s means the engine crashed, hung, or the laptop rebooted, so the watchdog trips the kill switch (HALT) through its own broker session and sends an alert. With the watchdog running every minute, a dead engine is caught within 2 minutes. A clean stop (`tradebot stop` or Ctrl+C) marks the heartbeat `stopped`, and the watchdog leaves it alone. Its broker key only needs to read and cancel orders. If the venue can't limit key permissions, it uses the same key, but the watchdog code only ever calls read and cancel.
 
 ## 6. Reconciliation
 
@@ -91,7 +91,7 @@ Reconciliation runs at startup, before each cycle and after each batch of fills.
 - **Stops:** every open position has exactly one resting protective stop, sized to the position.
 - **Cash / equity:** within tolerance of what the ledger expects.
 
-A mismatch trips the kill switch (HALT) and reports the difference. A missing stop is replaced automatically with an alert. If replacing it fails, the kill switch trips.
+A mismatch seen on two syncs in a row trips the kill switch (HALT) and reports the difference. A single one can be a fill in flight, since Trading 212's order history and positions update a moment apart. A missing stop is replaced automatically with an alert. If replacing it fails, the kill switch trips.
 
 ## 7. Human approval gate
 
@@ -163,6 +163,8 @@ The prompt shows symbol, side, quantity, notional, stop, the strategy's reason, 
 8. Delete a protective stop at the broker → the reconciler replaces it.
 9. Revoke two of the five LLM provider keys → the desk still reaches quorum. Revoke three → entries fail closed and an alert is sent.
 10. Set the LLM budget to €0.01 → the desk switches off, the strategies run alone, and an alert is sent.
+
+Results of each run: [build log](10-build-log.md#p1-shadow--demo-engine-built-2026-09-27). Drills 7, 9 and 10 need the desk (P2).
 
 ## 12. Legal, regulatory, tax (not legal advice)
 

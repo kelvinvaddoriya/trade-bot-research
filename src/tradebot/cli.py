@@ -3,9 +3,10 @@ import argparse
 import datetime as dt
 import itertools
 import json
+import os
 import sys
 
-from . import backtest, data, report
+from . import backtest, data, report, risk
 from .config import REPORTS_DIR, load_instruments, load_risk, load_settings
 from .strategies import STRATEGIES
 
@@ -136,96 +137,138 @@ def cmd_t212_map(args) -> None:
         print(f"  unresolved {s}: candidates {c}")
 
 
-def cmd_demo_trade(args) -> None:
-    """Demo order through the real pipeline: risk check -> submit-once -> broker -> journal -> reconcile."""
-    import time
+# ---------- live engine (P1) ----------
 
-    from . import risk
-    from .execution import fill_price, journal, submit_once, wait_for
-    from .models import OrderIntent, Signal, intent_id
-    from .sizing import ENTRY_LIMIT
-    from .trading212 import TICKERS, is_open, load_tickers, qty
-
-    inst, risk_cfg, sym = load_instruments(), load_risk(), args.symbol.upper()
-    if sym not in inst or inst[sym]["currency"] != "EUR":
-        sys.exit("demo supports the whitelisted EUR instruments (e.g. SXR8, SAP)")
+def _engine():
+    from .live import DB_PATH, Engine
+    from .store import Store
+    from .trading212 import TICKERS, load_tickers
+    risk_cfg = load_risk()                                        # a bad limit refuses to start (drill 6)
+    settings, inst = load_settings(), load_instruments()
+    if settings.get("mode") != "demo":
+        sys.exit('the live engine runs mode = "demo" only until P3 (config/settings.toml)')
     if not TICKERS.exists():
-        cmd_t212_map(args)
-    tk = load_tickers()[sym]
-    ticker, t = tk["ticker"], _t212()
+        sys.exit("config/t212_tickers.toml missing: run `python -m tradebot t212-map` first")
+    return Engine(_t212(), Store(DB_PATH), data.read_env(), settings, inst, risk_cfg, load_tickers())
 
-    summ = t.summary()
-    avail = summ["cash"]["availableToTrade"]
-    print(f"account: DEMO, {summ['currency']}, available {avail:,.2f} (bot sizes against the €{risk_cfg['capital_cap_eur']} cap)")
-    open_now = is_open(t.exchanges(), tk["schedule"])
-    bars = data.fetch_yahoo(inst[sym]["yahoo"], str(dt.date.today() - dt.timedelta(days=14)))
-    close, bar_day = float(bars.iloc[-1]["close"]), bars.iloc[-1]["date"]
-    print(f"instrument: {sym} = {ticker} ({tk['name']}); market open now: {open_now}; last close {close:.2f} on {bar_day}")
 
-    positions, open_orders = t.positions(), t.orders()
-    if any(o.get("ticker") == ticker for o in open_orders):
-        sys.exit(f"there are already open orders for {ticker}: the bot's account must only hold its own orders")
-    held = {p.get("ticker") or p.get("instrument", {}).get("ticker"): p.get("quantity", 0) for p in positions}
+def cmd_run(args) -> None:
+    from .live import MAX_SKEW_S, engine_alive
+    if engine_alive():
+        sys.exit("another engine is running (its heartbeat is fresh): two engines would send duplicate orders")
+    eng = _engine()
+    eng.broker.summary()                                          # the first call also measures the clock skew
+    if abs(eng.broker.skew) > MAX_SKEW_S:
+        sys.exit(f"clock off by {eng.broker.skew:+.1f} s vs the broker: fix Windows time sync first (docs/05 §10)")
+    eng.db.event("ENGINE_START", pid=os.getpid(), limits_hash=eng.risk_cfg["hash"], settings_hash=eng.settings["hash"],
+                 code=report.code_hash(), skew=round(eng.broker.skew, 2), kill_switch=risk.is_tripped())
+    print(f"engine started (demo): limits {eng.risk_cfg['hash']}, code {report.code_hash()}, clock skew "
+          f"{eng.broker.skew:+.2f} s, kill switch {'TRIPPED' if risk.is_tripped() else 'off'}. Ctrl+C stops it.", flush=True)
+    try:
+        eng.loop()
+    except KeyboardInterrupt:
+        print("stopped")
 
-    if args.mode == "roundtrip" and not open_now:
-        sys.exit("market closed: the round trip needs an open market (Xetra 09:00-17:30 CET)")
-    limit = close * (1 - 0.015) if args.mode == "lifecycle" else close * (1 + ENTRY_LIMIT)
-    q = qty(args.eur / limit)
-    sig = Signal("demo", sym, "buy", "entry", dt.date.today(), f"manual demo ({args.mode})", close)
-    intent = OrderIntent(intent_id("demo", sym, "buy", dt.datetime.now()), sig, q, "limit", limit, q * limit)
-    st = risk.RiskState(mode="demo", day=dt.date.today(), cash_eur=min(avail, risk_cfg["capital_cap_eur"]),
-                        held_qty={sym: held.get(ticker, 0.0)}, last_bar={sym: bar_day}, last_close={sym: close})
-    dec = risk.check(intent, st, risk_cfg)
-    journal("RISK_DECISION", intent_id=intent.id, approved=dec.approved, reason=dec.reason, limits_hash=dec.limits_hash)
-    print(f"risk engine: {'APPROVED' if dec.approved else 'REJECTED: ' + dec.reason} "
-          f"(buy {q} x {ticker} limit {limit:.2f} = €{q * limit:.2f}, limits {dec.limits_hash})")
-    if not dec.approved:
-        return
 
-    def match(orders):
-        return next((o for o in orders if o.get("ticker") == ticker and abs(o.get("quantity", 0) - q) < 1e-6), None)
+def cmd_stop(args) -> None:
+    from .live import STOP_FILE, TICK_S, engine_alive
+    STOP_FILE.touch()
+    print(f"stop requested: the engine exits within {TICK_S} s" if engine_alive() else "no running engine; stop file left for the next start to clear")
 
-    order = submit_once(t, intent.id, lambda: t.place_limit(ticker, q, limit, "DAY"), match)
-    if order is None:
-        sys.exit("order not found after two lookups: nothing resent (submit-once). Check the app.")
-    oid = order["id"]
-    time.sleep(2)
-    now = t.order(oid)
-    print(f"order {oid}: accepted by Trading 212, status {now.get('status')} "
-          f"({now.get('type')} {now.get('quantity')} @ {now.get('limitPrice')}, {now.get('timeInForce') or now.get('timeValidity')})")
-    journal("BROKER_STATUS", intent_id=intent.id, order_id=oid, status=now.get("status"))
 
-    if args.mode == "lifecycle":
-        t.cancel(oid)
-        final = wait_for(t, oid, ticker, {"CANCELLED"})
-        journal("CANCELLED", intent_id=intent.id, order_id=oid, status=final and final["status"],
-                filled=final and final.get("filledQuantity"))
-        print(f"order {oid}: cancel requested -> {final and final['status']} (filled {final and final.get('filledQuantity')})")
-    else:
-        final = wait_for(t, oid, ticker, timeout=120)
-        if not final or final.get("status") != "FILLED":
-            if final is None or final.get("status") not in ("CANCELLED", "REJECTED"):
-                t.cancel(oid)
-            sys.exit(f"entry not filled ({final and final.get('status')}): cancelled, nothing held")
-        fq, fpx = final["filledQuantity"], fill_price(final)
-        journal("FILLED", intent_id=intent.id, order_id=oid, qty=fq, price=fpx)
-        print(f"FILLED {fq} @ {fpx:.2f}")
-        stop = submit_once(t, intent.id + "-stop", lambda: t.place_stop(ticker, -fq, fpx * 0.97), match=lambda o: None)
-        print(f"protective stop {stop['id']} placed at {fpx * 0.97:.2f} (GTC)")
-        t.cancel(stop["id"])
-        wait_for(t, stop["id"], ticker, {"CANCELLED"})
-        sell = submit_once(t, intent.id + "-exit", lambda: t.place_market(ticker, -fq), match=lambda o: None)
-        done = wait_for(t, sell["id"], ticker, timeout=120)
-        journal("EXIT", intent_id=intent.id, order_id=sell["id"], status=done and done.get("status"))
-        print(f"closed: market sell {sell['id']} -> {done and done.get('status')}")
+def cmd_watchdog(args) -> None:
+    from . import notify
+    from .live import DB_PATH, watchdog
+    from .store import Store
+    db, env = Store(DB_PATH), data.read_env()
+    print(watchdog(_t212(), db, lambda t: notify.alert(db, env, t)))
 
-    time.sleep(1)
-    left = [o for o in t.orders() if o.get("ticker") == ticker]
-    pos = {p.get("ticker") or p.get("instrument", {}).get("ticker"): p.get("quantity") for p in t.positions()}
-    ok = not left and pos.get(ticker, 0) == held.get(ticker, 0)
-    journal("RECONCILE", ticker=ticker, open_orders=len(left), position=pos.get(ticker, 0), ok=ok)
-    print(f"reconcile: open orders for {ticker}: {len(left)}, position: {pos.get(ticker, 0)} -> {'OK' if ok else 'MISMATCH'}")
-    print("journal: data/journal.jsonl")
+
+def cmd_status(args) -> None:
+    from .live import DB_PATH, heartbeat
+    from .store import Store
+    db, k, hb, settings = Store(DB_PATH), risk.state(), heartbeat(), load_settings()
+    print(f"mode: {settings.get('mode')}   kill switch: "
+          + (f"TRIPPED ({k['reason']}, by {k['by']}, {k['ts']})" if k["tripped"] else "off"))
+    print("heartbeat: " + (f"{hb['state']}, {dt.datetime.now().timestamp() - hb['ts']:.0f} s old (pid {hb['pid']})" if hb else "none"))
+    last = {e["type"]: e for e in db.events("type IN ('ENGINE_START', 'ENGINE_STOP', 'RECONCILE', 'EQUITY', 'REPORT')")}
+    for t in ("ENGINE_START", "ENGINE_STOP", "RECONCILE", "EQUITY", "REPORT"):
+        if t in last:
+            print(f"last {t.lower()}: {last[t]['ts']} {json.dumps(last[t]['payload'], default=str)[:200]}")
+    for name in settings.get("live", {}).get("strategies", []):
+        c = db.events("type='CYCLE' AND entity=?", name)[-1:]
+        print(f"last cycle {name}: " + (f"{c[0]['payload']['session']} {c[0]['payload']['result']}" if c else "none"))
+    print("open lots:")
+    for l in db.select("lots", "status='OPEN'"):
+        print(f"  {l['symbol']} {l['qty']:.4f} @ {l['entry_price']:.2f}, stop {l['stop_price']:.2f} (since {l['entry_date']})")
+    print("open or pending orders:")
+    for o in db.select("orders", "done=0"):
+        print(f"  {o['role']} {o['symbol']} {o['qty']:.4f} {o['type']} {o['price'] or ''} -> {o['status']} (session {o['session'] or '-'})")
+    print("recent alerts:")
+    for e in db.events("type='ALERT'")[-5:]:
+        print(f"  {e['ts']} {e['payload']['text']}")
+
+
+def cmd_kill(args) -> None:
+    """HALT from the terminal (docs/05 §4). --flatten also plans a market exit for every lot at the next open."""
+    from . import execution, notify
+    from .live import DB_PATH
+    from .store import Store
+    from .trading212 import current, load_tickers, next_after, sessions
+    db, env, t = Store(DB_PATH), data.read_env(), _t212()
+    execution.halt(t, db, args.reason, lambda x: notify.alert(db, env, x), by="operator")
+    print("kill switch tripped; entry orders cancelled; protective stops kept")
+    if args.flatten:
+        tickers, ex, now = load_tickers(), t.exchanges(), dt.datetime.now(dt.UTC)
+        for lot in db.select("lots", "status='OPEN'"):
+            sess = sessions(ex, tickers[lot["symbol"]]["schedule"])
+            s = current(sess, now) or next_after(sess, now)
+            execution.plan_order(db, key=f"{lot['id']}-flatten", role="exit", strategy=lot["strategy"], symbol=lot["symbol"],
+                                 ticker=lot["ticker"], lot=lot["id"], session=s[0].date().isoformat(), qty=lot["qty"],
+                                 type="market", reason=f"flatten (operator): {args.reason}")
+            print(f"  flatten: market exit planned for {lot['symbol']} (session {s[0].date()})")
+
+
+def cmd_reset_kill(args) -> None:
+    """The only way out of HALT (docs/05 §4): shows why it tripped, requires typing RESET, logs who and why.
+    The engine reconciles on its next sync before it trades again."""
+    from .live import DB_PATH
+    from .store import Store
+    k = risk.state()
+    if not k["tripped"]:
+        sys.exit("the kill switch is not tripped")
+    db = Store(DB_PATH)
+    print(f"tripped {k['ts']} by {k['by']}: {k['reason']}")
+    rec = db.events("type='RECONCILE'")[-1:]
+    print("last reconciliation: " + (json.dumps(rec[0]["payload"], default=str)[:300] if rec else "none"))
+    for l in db.select("lots", "status='OPEN'"):
+        print(f"  open lot {l['symbol']} {l['qty']:.4f}, stop {l['stop_price']:.2f}")
+    if input("type RESET to re-arm trading: ").strip() != "RESET":
+        sys.exit("not reset")
+    risk.reset(args.who, args.reason)
+    db.event("KILL_RESET", who=args.who, why=args.reason)
+    print("kill switch reset")
+
+
+def cmd_reconcile(args) -> None:
+    from . import notify
+    from .execution import sync
+    from .live import DB_PATH, engine_alive
+    from .store import Store
+    if engine_alive():
+        sys.exit("the engine is running and reconciles on every sync: see `status`")
+    db, env = Store(DB_PATH), data.read_env()
+    problems = sync(_t212(), db, lambda t: notify.alert(db, env, t))
+    print("reconciliation OK" if not problems else "MISMATCH:\n  " + "\n  ".join(problems))
+
+
+def cmd_report(args) -> None:
+    from .live import REPORT_SCHEDULE
+    from .trading212 import last_closed
+    eng = _engine()
+    eng.calendar()
+    last = last_closed(eng.cal[REPORT_SCHEDULE], dt.datetime.now(dt.UTC))
+    print(f"report: {eng.daily_report(last[0].date())}")
 
 
 def main() -> None:
@@ -244,12 +287,19 @@ def main() -> None:
     g.add_argument("--param", action="append", help="fixed parameter for all combinations")
     g.set_defaults(fn=cmd_grid)
     sub.add_parser("t212-map", help="map whitelisted instruments to Trading 212 tickers").set_defaults(fn=cmd_t212_map)
-    d = sub.add_parser("demo-trade", help="place a demo order on the Trading 212 PRACTICE account")
-    d.add_argument("--symbol", default="SXR8")
-    d.add_argument("--eur", type=float, default=25.0, help="order size in EUR (default 25)")
-    d.add_argument("--mode", default="lifecycle", choices=["lifecycle", "roundtrip"],
-                   help="lifecycle: place a limit below the market and cancel it (any time); "
-                        "roundtrip: buy, protective stop, sell (market must be open)")
-    d.set_defaults(fn=cmd_demo_trade)
+    sub.add_parser("run", help="start the live engine (demo)").set_defaults(fn=cmd_run)
+    sub.add_parser("stop", help="ask the running engine to exit cleanly (no watchdog trip)").set_defaults(fn=cmd_stop)
+    sub.add_parser("watchdog", help="one watchdog check (Task Scheduler runs it every minute)").set_defaults(fn=cmd_watchdog)
+    sub.add_parser("status", help="kill switch, heartbeat, lots, orders, last events").set_defaults(fn=cmd_status)
+    k = sub.add_parser("kill", help="trip the kill switch (HALT): cancel entries, keep stops")
+    k.add_argument("--reason", required=True)
+    k.add_argument("--flatten", action="store_true", help="also sell every lot at market at the next open")
+    k.set_defaults(fn=cmd_kill)
+    r = sub.add_parser("reset-kill", help="re-arm trading after a HALT (typed confirmation, logged)")
+    r.add_argument("--who", required=True)
+    r.add_argument("--reason", required=True)
+    r.set_defaults(fn=cmd_reset_kill)
+    sub.add_parser("reconcile", help="reconcile the ledger with the broker (engine stopped)").set_defaults(fn=cmd_reconcile)
+    sub.add_parser("report", help="write the daily report for the last US session now").set_defaults(fn=cmd_report)
     args = p.parse_args()
     args.fn(args)

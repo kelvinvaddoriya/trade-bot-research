@@ -21,7 +21,7 @@ def code_hash() -> str:
     """Hash of source + config: identifies the exact code a result came from (no git commits yet)."""
     h = hashlib.sha256()
     for p in sorted([*(ROOT / "src" / "tradebot").glob("*.py"), *CONFIG_DIR.glob("*.toml")]):
-        h.update(p.name.encode() + p.read_bytes())
+        h.update(p.name.encode() + p.read_bytes().replace(b"\r\n", b"\n"))      # line endings vary by checkout
     return h.hexdigest()[:12]
 
 

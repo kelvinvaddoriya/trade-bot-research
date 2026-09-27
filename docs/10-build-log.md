@@ -2,6 +2,102 @@
 
 One entry per backlog step ([07](07-roadmap.md)): what was built, decisions made, how to run it, and the results. Newest phase first; steps in order within a phase.
 
+## P1: Shadow & demo engine (built 2026-09-27)
+
+The owner asked to start P1. The whole P1 deliverable list is built and tested. Five of the eight P1 drills passed against the Trading 212 practice account on a closed-market Sunday. What's left is waiting: the 2-week unattended run, and the first real fills (S1's first orders go out on Thursday 2026-10-01).
+
+### Owner decisions (defaults I set on 2026-09-27; the owner can override any of them)
+
+The three P0 questions ([step 11](#step-11-backtest-results-and-the-p0-gate)) blocked P1, so I took the defaults that follow from earlier owner decisions:
+
+| # | Question | Decision | Why |
+|---|---|---|---|
+| 1 | S2's role | **Shadow only.** Its decisions come from the backtest engine run over the live period; it places no orders. | S2 failed its gate, so it doesn't trade. The desk reviews S2 entries only (resolved item 4), so P2 needs S2's decisions to exist. |
+| 2 | S2's €400 budget | **Stays unused.** S1 keeps its €600. | S1 then runs exactly as backtested, so the forward check compares like with like. |
+| 3 | EU runtime data | **Yahoo**, with a freshness check against Trading 212's calendar | P1's budget is €0 (resolved item 3). A paid EU source comes before real money. |
+
+### Built
+
+| Module | What it does |
+|---|---|
+| `store.py` | SQLite `data/demo.db` in WAL mode, autocommit: append-only `events`, the `orders` ledger (PENDING → SUBMITTING/UNKNOWN → broker status) and `lots` |
+| `execution.py` (rewritten) | The order manager. **`submit()`** is the submit-once protocol on the ledger: journal first, one POST, a timeout or 5xx means UNKNOWN, then two lookups 10 s apart in open orders *and* history (a filled market order has already left the open list). A lost order is resubmitted once, after one more lookup; lost twice trips the kill switch. **`sync()`** mirrors every order into the ledger (entry fills open lots, stop and exit fills close them, with P&L) and reconciles open orders and positions. **`ensure_stops()`** keeps exactly one GTC stop per lot at its price and size. **`execute_pending()`** sends at the open. **`halt()`** writes the kill file first, then cancels entries and keeps stops. |
+| `live.py` | The engine loop (20 s ticks; syncs every 2 min in session, 10 min outside), the decision cycle once per session after the close, the heartbeat thread, the watchdog check, equity marks (drawdown → HALT, daily loss → no entries), the daily report |
+| `notify.py` | Alerts to the console, the journal and Telegram (at most once an hour per text); healthchecks.io pings (`/fail` when a sync fails) |
+| `trading212.py` | Calendar from the exchange schedules (`sessions`, `current`, `last_closed`, `next_after`); `history()`; clock skew from the `Date` header; rate-limit retries (see the drill 1 bug) |
+| `risk.py` | Check 3 (the market has a next session); the kill file is read at call time, so tests and other processes can point at it; backtests skip it by mode |
+| `data.py` | `refresh()`: full history up to the session that just closed. `fetch_yahoo` used to drop today's bar, which would have hidden the session the cycle is deciding on. |
+| `cli.py` | `run`, `stop`, `watchdog`, `status`, `kill [--flatten]`, `reset-kill`, `reconcile`, `report` |
+| `ops/install-tasks.ps1` | Laptop setup for 24/7 (docs/09 §6): power plan, hourly time sync, Task Scheduler (engine at boot with restart, watchdog every minute, nightly backup). **For the owner to run**, since it changes system settings. |
+| `config/settings.toml` | `mode = "demo"`; `[live]`: start date 2026-09-28, S1 trades, S2 in shadow |
+
+**Removed:** the `demo-trade` command and its JSONL journal. The engine does its round trip through the ledger now, and a second path to the broker would break "one door to the broker".
+
+### Design decisions
+
+| Decision | Why |
+|---|---|
+| **Orders go out at the open + 2 min, not queued overnight** ([04 §3](04-architecture.md#3-runtime-cycle)) | Nothing but stops rests at the broker overnight; a crash between close and open leaves nothing half-sent; a night-time kill has no queued entries to chase. It also sidesteps two untested broker behaviours: whether a DAY order placed after the close survives into the next session, and whether stops can be placed while the market is closed. |
+| **The calendar comes from Trading 212's schedules**, not `exchange_calendars` | The venue's own sessions, about three weeks back and ahead, with holidays and half days. One dependency fewer. The US regular session ends at `AFTER_HOURS_OPEN`. |
+| **A mismatch must show on two syncs in a row** before HALT | Order history and positions update a moment apart after a fill, so a single mismatch can be a fill in flight. Orders that left the open list but aren't in history yet are "limbo": their ticker is skipped for 10 minutes, then counted as a mismatch. |
+| **Stops are placed or replaced only in session** | Nothing can trigger overnight. A trail decided at the close (cancel, then place) takes effect at the next open. |
+| **The heartbeat thread beats only while the loop makes progress** | A dead engine goes stale in 60 s (the watchdog catches it within 2 minutes); a hung loop stops the beat after 10 minutes. |
+| **`stop` command** | Stopping the engine any other way looks like a crash and trips the kill switch (by design). `stop` exits cleanly within 20 s. |
+| **Forward check in the daily report** | P1 tests the implementation, not the edge ([06 §4](06-backtesting.md#4-statistical-sanity)). The backtest over the live period must hold the same symbols the engine holds; a difference is flagged. S2's shadow book comes from the same run. |
+| **Two engines can't run at once** | `run` refuses while another heartbeat is fresh. Two engines would send duplicate orders. |
+
+### Drills ([05 §11](05-risk-and-safety.md#11-drills-all-must-pass-before-each-promotion))
+
+| # | Drill | Unit test | Against the demo API (2026-09-27, market closed) |
+|---|---|---|---|
+| 1 | Manual kill with orders open | ✅ entries cancelled, stop kept, no new entries | ✅ The entry order was cancelled at the broker and the ledger shows CANCELLED. After a restart the engine stayed halted. *Stops kept*: unit test only until there is a position. **Found a bug, fixed below.** |
+| 2 | Kill the engine process | ✅ | ✅ Killed at 16:19:08 UTC; the watchdog tripped at 16:20:10 (62 s, so within 2 minutes when run every minute) |
+| 3 | Network cut during a submit | ✅ | ✅ Simulated at the socket. *Sent, answer lost:* found by lookup and adopted, 1 order at the broker. *Lost before sending:* two empty lookups, then exactly one resubmit. The lookup also ignored the identical-looking order already claimed by the first case. |
+| 4 | Stale data | ✅ waits until 15 min before the next open, then skips with an alert | ⏳ Unit test only; Yahoo's late closes (see the P1 preview) will likely trigger it for real |
+| 5 | Manual order in the account | ✅ | ✅ The mismatch was seen once, then HALT on the next sync; the unknown buy order was cancelled |
+| 6 | Out-of-bounds limit | ✅ (P0) | ✅ `run` refused: `capital_cap_eur=5000 outside [100, 1000]`; `risk.toml` restored |
+| 7 | LLM failure paths | — | P2 (no desk yet) |
+| 8 | Delete a protective stop | ✅ replaced, with an alert | ⏳ Needs a position: after S1's first fill (2026-10-01) |
+
+Plus a full-loop engine test: month-end close → planned entry → sent at the open → fill → stop at fill − 3×ATR → stop-out closes the lot → reconciliation OK.
+
+**Bug found by drill 1: rate limits across processes.** `kill` runs as its own process. Its `GET /equity/orders` hit HTTP 429 because the drill had just made the same call, and the adapter's single retry at `x-ratelimit-reset` got a second 429. The process crashed after tripping the switch but before cancelling the entry. The kill switch had been written first, so trading was halted anyway, and the engine's next sync cancelled the entry (it cancels entries on every sync while tripped). **Fix:** up to 3 retries on 429, each waiting for `retry-after` or the reset plus 1 s. This is safe even for order POSTs, because a 429 means nothing was executed. A regression test covers it.
+
+**Findings:**
+
+| Finding | Consequence |
+|---|---|
+| Rejected requests seem to count against the rate window (1 per 5 s for the order list), and responses carry `retry-after` | The engine, watchdog and CLI share one key, so every client must wait with a margin (fixed above) |
+| Open orders carry `createdAt` (e.g. `2026-09-27T19:21:20.788+03:00`), `side`, `type`, `quantity`, `limitPrice`, `timeInForce: DAY` | Enough to match an order whose response was lost (drill 3) |
+| Clock skew vs the broker: −0.4 to −0.8 s | Within the 2 s limit. Windows syncs only weekly by default, so the setup script makes it hourly. |
+| Xetra opens at 07:00:03 UTC in Trading 212's schedule | Orders go out at open + 2 min, after the opening auction |
+
+**Smoke run (2026-09-27 16:18 UTC):** the engine started (limits `eff24a142253`, code `9bc8a4ffec1a`), reconciled OK and recorded Friday's cycle as "not a check day". It also wrote `reports/daily/2026-09-25.md`, which is empty because the demo run starts on 2026-09-28. The journal has every drill's events.
+
+**Tests:** 81, up from 61:
+- `test_execution.py` (14): submit-once, fills, stops, exits, reconciliation and HALT against a stateful fake Trading 212.
+- `test_live.py` (7): the full loop, check days, drills 2, 4 and 5, drawdown.
+- Adapter tests: the calendar, `wait_final` reading history, 429 retries.
+- `conftest.py` keeps every test away from the real `data/KILL`.
+
+### What happens next
+
+| When | What |
+|---|---|
+| Once the tasks are installed | The engine runs 24/7: syncs, heartbeat, pings, a daily report after each US close |
+| Wed 2026-09-30, ~17:50 CEST | S1's first check day (last Xetra session of September): signals, sizing and risk checks; entries planned |
+| Thu 2026-10-01, ~09:02 CEST | The entries go out, fills arrive, stops follow. Then: repeat drill 8 (delete a stop in the app) and drill 1's "stops kept" half. |
+| Fri 2026-10-30 | Next check day (exits, trails, new entries) |
+| ~2 weeks after installing | P1 gate review. "Clean" means no kill-switch trip or mismatch from an engine fault, a daily report for every US session, and the forward check matching. |
+
+**Needs the owner:**
+1. ~~Run `ops/install-tasks.ps1` once in an elevated PowerShell.~~ ✅ Done 2026-09-27 23:02 CEST. The engine task is running (S4U logon); the watchdog runs every minute with exit code 0; the lid does nothing on AC; Windows time synced.
+
+   **Fix made while checking it:** the journal's limits hash had changed from `eff24a142253` to `38b52067eea6` with identical limits. When I restored `risk.toml` after drill 6, git (`core.autocrlf=true`) rewrote it with CRLF line endings, and the hash was taken over raw bytes. The config hash and the code hash now ignore line endings, so the limits hash is `eff24a142253` again and matches the P0 reports. A test covers it (82 tests). The engine was restarted with `stop` + the scheduled task: the watchdog saw a clean stop and did not trip.
+2. ~~Create a Telegram bot and a healthchecks.io check, and put the three values in `.env`.~~ ✅ Done 2026-09-27: the bot token checks out and a test alert was sent; a test ping to healthchecks.io returned 200 OK.
+3. Set Windows Update active hours to 06:00–00:00.
+4. Review the three default decisions above.
+
 ## P1 preview: first demo order on Trading 212 (2026-09-26)
 
 The owner asked for a demo trade. It was built as the first slice of P1's broker adapter, running through the real pipeline: **risk check → submit-once → Trading 212 practice account → journal → reconcile**.
@@ -48,7 +144,7 @@ The owner asked for a demo trade. It was built as the first slice of P1's broker
 
 **Tests (`tests/test_trading212.py`, 8):** the live URL is refused; quantities round down; ticker mapping by ISIN, currency and venue; `is_open` across a session; submit-once finds a timed-out order without resending, gives up after two empty lookups, and treats a broker rejection as final; `wait_for` reads history so a fill isn't mistaken for a cancel. 61 tests in total.
 
-**Next (needs an open market):** `uv run python -m tradebot demo-trade --symbol SXR8 --eur 25 --mode roundtrip`, during Xetra hours (09:00–17:30 CET). It buys ~€25 with a marketable limit at close + 1 %, places a GTC protective stop 3 % below the fill, then cancels the stop, sells at market, and reconciles to flat. These steps haven't yet run against Trading 212 with a real fill.
+**Superseded (2026-09-27):** the planned `demo-trade --mode roundtrip` run was dropped with the command. The P1 engine does the same round trip (limit entry, GTC stop, cancel, market exit, reconcile) through the ledger, starting with S1's first orders on 2026-10-01.
 
 ## P0: Foundations & backtest (started 2026-09-25)
 

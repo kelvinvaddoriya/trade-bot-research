@@ -33,6 +33,7 @@ class Result:
     rejections: Counter = field(default_factory=Counter)
     unfilled: int = 0
     kill_switch_would_trip: pd.Timestamp | None = None
+    held: list[str] = field(default_factory=list)          # symbols still open at the end
 
 
 def run(strategy, panel: dict[str, pd.DataFrame], instruments: dict, budget: float, start: str, end: str,
@@ -135,7 +136,7 @@ def run(strategy, panel: dict[str, pd.DataFrame], instruments: dict, budget: flo
                     continue
                 intent = make_intent(sig, qty)
             st.orders_this_minute = 0     # live, the executor spaces orders out (≥ 2 s apart); the day limit still applies
-            dec = riskmod.check(intent, st, risk_cfg, kill_file=None)
+            dec = riskmod.check(intent, st, risk_cfg)
             if not dec.approved:
                 rejections[f"risk: {dec.reason}"] += 1
                 continue
@@ -148,7 +149,7 @@ def run(strategy, panel: dict[str, pd.DataFrame], instruments: dict, budget: flo
     idx = pd.DatetimeIndex(dates)
     return Result(strategy.name, dict(vars(strategy)), start, end, costs_mult,
                   pd.Series(eq, idx), benchmark(panel, idx, budget), pd.Series(expo, idx), trades,
-                  len(positions), rejections, unfilled, would_trip)
+                  len(positions), rejections, unfilled, would_trip, sorted(positions))
 
 
 def benchmark(panel: dict[str, pd.DataFrame], idx: pd.DatetimeIndex, budget: float) -> pd.Series:

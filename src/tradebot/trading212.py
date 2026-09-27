@@ -1,10 +1,12 @@
 """Trading 212 REST adapter (docs/01 §4.1). Demo only: live needs the P3 arming (docs/04 §8).
 
 Decimal rounding happens here, at the broker boundary. Rate limits are read from the response headers
-(x-ratelimit-remaining/-reset) and honoured per endpoint.
+(x-ratelimit-remaining/-reset) and honoured per endpoint. The exchange schedules double as the trading
+calendar: they list each session (holidays and half days included) about three weeks back and ahead.
 """
 import base64
 import datetime as dt
+import email.utils
 import json
 import re
 import time
@@ -41,6 +43,7 @@ class Trading212:
         self.base = base
         self.auth = "Basic " + base64.b64encode(f"{key}:{secret}".encode()).decode()
         self.wait_until: dict[str, float] = {}
+        self.skew = 0.0                                     # local clock minus broker clock, seconds
 
     def _call(self, method: str, path: str, body: dict | None = None):
         ep = f"{method} {re.sub(r'/\d+', '/{id}', path.split('?')[0])}"
@@ -50,17 +53,24 @@ class Trading212:
         req = urllib.request.Request(self.base + path, method=method,
                                      data=json.dumps(body).encode() if body is not None else None,
                                      headers={"Authorization": self.auth, "Content-Type": "application/json"})
-        for attempt in range(2):
+        for attempt in range(4):
+            t0 = time.time()
             try:
                 with urllib.request.urlopen(req, timeout=20) as r:
                     self._note(ep, r.headers)
+                    if r.headers.get("Date"):                 # whole seconds: compare with the middle of that second
+                        server = email.utils.parsedate_to_datetime(r.headers["Date"]).timestamp() + 0.5
+                        self.skew = (t0 + time.time()) / 2 - server
                     raw = r.read()
                     return json.loads(raw) if raw else None
             except urllib.error.HTTPError as e:
                 self._note(ep, e.headers)
                 text = e.read().decode(errors="replace")[:300]
-                if e.code == 429 and attempt == 0:         # rejected for rate: nothing was executed, safe to retry
-                    time.sleep(max(1.0, self.wait_until.get(ep, time.time() + 5) - time.time()))
+                if e.code == 429 and attempt < 3:
+                    # Rejected for rate, so nothing was executed: safe to retry, even a POST. The engine, watchdog
+                    # and CLI share one key, and a rejected request seems to count too, so wait with a margin.
+                    wait = max(float(e.headers.get("retry-after") or 0), self.wait_until.get(ep, 0) - time.time())
+                    time.sleep(max(1.0, wait) + 1.0)
                     continue
                 raise T212Error(e.code, text) from None
         # timeouts / connection errors propagate: for POSTs the caller treats the outcome as UNKNOWN
@@ -82,14 +92,14 @@ class Trading212:
     def order(self, order_id: int):
         return self._call("GET", f"/equity/orders/{order_id}")
 
+    def history(self, ticker: str) -> list[dict]:
+        """The latest 50 finished orders for a ticker, each with its fill (if any)."""
+        body = self._call("GET", f"/equity/history/orders?ticker={ticker}&limit=50")
+        return [{**it.get("order", it), "fill": it.get("fill")} for it in body.get("items", [])]
+
     def order_history(self, ticker: str, order_id: int) -> dict | None:
         """Final state of an order that has left the active list (filled, cancelled, rejected)."""
-        body = self._call("GET", f"/equity/history/orders?ticker={ticker}&limit=50")
-        for it in body.get("items", []):
-            o = it.get("order", it)
-            if o.get("id") == order_id:
-                return {**o, "fill": it.get("fill")}
-        return None
+        return next((o for o in self.history(ticker) if o.get("id") == order_id), None)
 
     def instruments(self):
         return self._call("GET", "/equity/metadata/instruments")
@@ -148,12 +158,27 @@ def load_tickers() -> dict:
     return tomllib.loads(TICKERS.read_text(encoding="utf-8"))
 
 
-def is_open(exchanges: list[dict], schedule_id: int, now: dt.datetime | None = None) -> bool:
-    """Regular session open iff the latest schedule event at or before now is OPEN."""
-    now = now or dt.datetime.now(dt.UTC)
+Session = tuple[dt.datetime, dt.datetime]
+
+
+def sessions(exchanges: list[dict], schedule_id: int) -> list[Session]:
+    """Regular sessions (open, close) in UTC: each OPEN event until the next event (CLOSE on Xetra,
+    AFTER_HOURS_OPEN in the US)."""
     for ex in exchanges:
         for ws in ex.get("workingSchedules", []):
             if ws["id"] == schedule_id:
-                past = [e for e in ws["timeEvents"] if dt.datetime.fromisoformat(e["date"].replace("Z", "+00:00")) <= now]
-                return bool(past) and past[-1]["type"] == "OPEN"
-    return False
+                ev = sorted((dt.datetime.fromisoformat(e["date"].replace("Z", "+00:00")), e["type"]) for e in ws["timeEvents"])
+                return [(t, ev[i + 1][0]) for i, (t, kind) in enumerate(ev[:-1]) if kind == "OPEN"]
+    return []
+
+
+def current(sess: list[Session], now: dt.datetime) -> Session | None:
+    return next((s for s in sess if s[0] <= now < s[1]), None)
+
+
+def last_closed(sess: list[Session], now: dt.datetime) -> Session | None:
+    return max((s for s in sess if s[1] <= now), default=None)
+
+
+def next_after(sess: list[Session], t: dt.datetime) -> Session | None:
+    return min((s for s in sess if s[0] > t), default=None)

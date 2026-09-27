@@ -31,9 +31,9 @@ def state(**kw):
 
 def test_clean_entry_passes_and_is_recorded():
     st = state()
-    d = risk.check(entry(), st, R, kill_file=None)
+    d = risk.check(entry(), st, R)
     assert d.approved and d.limits_hash == "h" and st.orders_today == 1
-    assert risk.check(entry(), st, R, kill_file=None).reason == "duplicate intent"
+    assert risk.check(entry(), st, R).reason == "duplicate intent"
 
 
 @pytest.mark.parametrize("intent,st,reason", [
@@ -50,23 +50,24 @@ def test_clean_entry_passes_and_is_recorded():
     (entry(), state(daily_loss_hit=True), "daily loss limit"),
     (entry(), state(cash_eur=100), "insufficient cash"),
     (entry(), state(mode="yolo"), "unknown mode yolo"),
+    (entry(), state(tradable={"AAPL"}), "market has no next session"),
 ])
 def test_each_check_rejects(intent, st, reason):
-    d = risk.check(intent, st, R, kill_file=None)
+    d = risk.check(intent, st, R)
     assert not d.approved and d.reason == reason
 
 
 def test_exits_skip_entry_only_limits():
     st = state(held_qty={"SAP": 1.0}, daily_loss_hit=True, cash_eur=0, deployed_eur=5000)
-    assert risk.check(exit_(), st, R, kill_file=None).approved
+    assert risk.check(exit_(), st, R).approved
 
 
-def test_kill_switch_is_sticky_and_blocks_everything(tmp_path):
-    kf, log = tmp_path / "KILL", tmp_path / "kill_log.jsonl"
-    risk.trip("drawdown 10%", path=kf, log=log)
-    assert risk.is_tripped(kf)                                    # a "restart" just re-reads the file
-    st = state(held_qty={"SAP": 1.0})
-    assert risk.check(exit_(), st, R, kill_file=kf).reason == "kill switch tripped"
-    risk.reset("owner", "tested", path=kf, log=log)
-    assert not risk.is_tripped(kf)
-    assert [json.loads(l)["tripped"] for l in log.read_text().splitlines()] == [True, False]
+def test_kill_switch_is_sticky_and_blocks_everything():
+    risk.trip("drawdown 10%")
+    assert risk.is_tripped() and risk.state()["reason"] == "drawdown 10%"   # a "restart" just re-reads the file
+    st = state(held_qty={"SAP": 1.0}, mode="demo")
+    assert risk.check(exit_(), st, R).reason == "kill switch tripped"
+    assert risk.check(exit_(), state(held_qty={"SAP": 1.0}), R).approved    # backtests don't read the file
+    risk.reset("owner", "tested")
+    assert not risk.is_tripped()
+    assert [json.loads(l)["tripped"] for l in risk.KILL_LOG.read_text().splitlines()] == [True, False]

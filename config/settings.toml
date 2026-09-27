@@ -1,8 +1,12 @@
-# Behaviour settings (docs/04 §8). P0 uses only the research-related keys.
-mode = "backtest"              # backtest | shadow | demo | live
-strategies = ["s1_trend", "s2_pullback"]
+# Behaviour settings (docs/04 §8).
+mode = "demo"                  # backtest | shadow | demo | live. The live engine (`run`) accepts only "demo" until P3.
 
-[budgets_eur]                  # per-strategy share of the €1,000 cap (docs/03 §4)
+[live]                         # the P1 demo engine (docs/10, P1)
+start = "2026-09-28"           # first session of the demo run; the daily forward check backtests from here
+strategies = ["s1_trend"]      # trade on the Trading 212 practice account
+shadow = ["s2_pullback"]       # decisions only, no orders: S2 failed its gate (owner decision, 2026-09-27)
+
+[budgets_eur]                  # per-strategy share of the €1,000 cap (docs/03 §4). S2's €400 stays unused in demo.
 s1_trend = 600
 s2_pullback = 400
 
