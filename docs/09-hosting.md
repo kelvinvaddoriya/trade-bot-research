@@ -27,6 +27,7 @@ Measured on 2026-09-24: Intel Core i5-7200U (2 cores / 4 threads, a 2016 laptop 
 | Sleep, hibernate, lid closed | Power plan: never sleep on AC; lid action "do nothing"; hibernate off |
 | Battery ageing from being always plugged in | Turn on the vendor's charge limit (60–80 %) if available |
 | Home power or internet outage | Stops at the broker; the external dead-man's switch alerts (§5) |
+| **Memory pressure from personal use** (seen 2026-09-28: 0.4 GB of 7.9 GB free, 21.5 GB committed) | New processes crawl, requests time out, a watchdog run hung for 5 minutes. Mitigated in code (a light watchdog, clock samples only from fast requests, restarts every 5 min, refusal alerts). Keep browser tabs and heavy apps down while the engine runs; a recurring problem is a reason to move to the VPS early. |
 | Shared personal machine (browsing, downloads) holding broker keys | Acceptable for **demo keys only**; live keys never go on this machine |
 | Laptop moved, closed or switched off by accident | The dead-man's switch alerts within one cycle |
 
@@ -56,7 +57,7 @@ Measured on 2026-09-24: Intel Core i5-7200U (2 cores / 4 threads, a 2016 laptop 
 
 ## 6. Laptop checklist (P0–P2)
 
-`ops/install-tasks.ps1` automates the power plan, hourly time sync, the Task Scheduler entries (engine at boot with restart on failure, watchdog every minute, nightly backup to `C:\TradeBotBackup`) and starts the engine. Run it once in an elevated PowerShell. The other items are manual.
+`ops/install-tasks.ps1` automates the power plan, hourly time sync, the Task Scheduler entries (engine at boot and started again every 5 minutes if it isn't running, watchdog every minute, nightly backup to `C:\TradeBotBackup`) and starts the engine. Run it once in an elevated PowerShell, and again after it changes: it stops a running engine cleanly before re-registering. The other items are manual.
 
 - [ ] Plugged in; never sleep on AC; lid closed → do nothing; hibernate off; battery charge limit on if available.
 - [ ] Windows Update: set active hours; patch manually at the weekend if needed.

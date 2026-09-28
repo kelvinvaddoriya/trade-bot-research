@@ -24,22 +24,35 @@ Restart-Service w32time
 w32tm /resync | Out-Null
 
 # --- scheduled tasks: run whether or not anyone is logged on (S4U: no stored password) ---
+# Re-installing? Stop a running engine cleanly first: re-registering its task could kill it, and the watchdog would
+# treat that as a crash.
+if ((Get-ScheduledTask -TaskName "TradeBot engine" -ErrorAction SilentlyContinue).State -eq "Running") {
+    & $py -m tradebot stop
+    foreach ($i in 1..12) {
+        Start-Sleep -Seconds 5
+        if ((Get-Content (Join-Path $root "data\heartbeat.json") -Raw | ConvertFrom-Json).state -eq "stopped") { break }
+    }
+}
 $me = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
 $forever = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable `
-    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew `
-    -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1)
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
 
-# Engine: starts at boot, restarted a minute after a crash. `python -m tradebot stop` exits cleanly (no restart).
+# Engine: starts at boot and is started again every 5 minutes; a start is ignored while it runs. Task Scheduler's
+# "restart on failure" only covers a task that fails to launch, not an engine that exits (found 2026-09-28), so
+# this is what brings back a crashed or refused engine. Keep it stopped: Disable-ScheduledTask "TradeBot engine".
 $engine = New-ScheduledTaskAction -Execute "cmd.exe" -WorkingDirectory $root `
     -Argument "/c `"$py`" -m tradebot run >> data\engine.log 2>&1"
-Register-ScheduledTask -TaskName "TradeBot engine" -Action $engine -Trigger (New-ScheduledTaskTrigger -AtStartup) `
+$engineTriggers = @((New-ScheduledTaskTrigger -AtStartup),
+    (New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)))
+Register-ScheduledTask -TaskName "TradeBot engine" -Action $engine -Trigger $engineTriggers `
     -Principal $me -Settings $forever -Force | Out-Null
 
-# Watchdog: every minute. It only touches the broker when the engine's heartbeat is stale.
+# Watchdog: every minute; imports no pandas, so it starts in about a second even when memory is short.
+# It only touches the broker when the engine's heartbeat is stale.
 $wd = New-ScheduledTaskAction -Execute $py -Argument "-m tradebot watchdog" -WorkingDirectory $root
 $every = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
 Register-ScheduledTask -TaskName "TradeBot watchdog" -Action $wd -Trigger $every -Principal $me `
-    -Settings (New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -StartWhenAvailable `
+    -Settings (New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -StartWhenAvailable `
         -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew) -Force | Out-Null
 
 # Nightly backup of the demo journal/ledger to C: (SQLite's backup API: consistent while the engine writes).
@@ -50,6 +63,6 @@ Register-ScheduledTask -TaskName "TradeBot backup" -Action $bk -Trigger (New-Sch
     -Principal $me -Settings (New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries) -Force | Out-Null
 
 Start-ScheduledTask -TaskName "TradeBot engine"
-Write-Host "Done. Engine started; watchdog every minute; backup nightly to $backup."
+Write-Host "Done. Engine started (and re-started within 5 minutes if it ever exits); watchdog every minute; backup nightly to $backup."
 Write-Host "Still manual (docs/09 §6): Windows Update active hours 06:00-00:00; battery charge limit if your laptop has one."
 Write-Host "Check with: cd $root; uv run python -m tradebot status"

@@ -14,7 +14,7 @@ import urllib.request
 import numpy as np
 import pandas as pd
 
-from .config import DATA_DIR, ROOT
+from .config import DATA_DIR, read_env  # noqa: F401  (read_env re-exported for callers)
 
 DB = DATA_DIR / "research.db"
 UA = {"User-Agent": "Mozilla/5.0 (TradeBot research; personal use)"}
@@ -36,18 +36,6 @@ def http_json(url: str, headers: dict | None = None, tries: int = 3) -> dict:
             if attempt == tries - 1 or (isinstance(e, urllib.error.HTTPError) and e.code < 500 and e.code != 429):
                 raise
             time.sleep(2 * (attempt + 1))
-
-
-def read_env() -> dict:
-    env = {}
-    path = ROOT / ".env"
-    if path.exists():
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, v = line.split("=", 1)
-                env[k.strip()] = v.strip().strip('"').strip("'")
-    return env
 
 
 # ---------- downloads ----------

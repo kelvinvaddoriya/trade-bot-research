@@ -34,7 +34,8 @@ Most questions are answered by Trading 212's API docs ([01 §4.1](01-platforms.m
 
 | Question | Answer | Status |
 |---|---|---|
-| Can stop orders use `GOOD_TILL_CANCEL`? | `timeValidity` is `DAY` or `GOOD_TILL_CANCEL` | ✅ documented; adapter test places a GTC stop |
+| Can stop orders use `GOOD_TILL_CANCEL`? | `timeValidity` is `DAY` or `GOOD_TILL_CANCEL` | ✅ confirmed 2026-09-28: the engine's first real stop was a GTC stop, accepted during the session ([10](10-build-log.md#demo-round-trip-drills-1-and-8-and-the-first-incident-2026-09-28)) |
+| How are sell orders reported? | Negative `quantity` plus `side: SELL` | ✅ seen 2026-09-28; the code compares absolute quantities |
 | Rate limits and HTTP 429 | Per endpoint (e.g. limit/stop orders 1 per 2 s); `x-ratelimit-reset` header; 429 when exceeded | ✅ documented |
 | Client order reference for idempotency | **None.** Docs warn that repeated requests may create duplicates | ✅ documented → submit-once protocol ([04 §4](04-architecture.md#4-core-data-contracts-sketch)) |
 | API key permissions | Chosen at key creation; optional IP allow-list; no money-movement endpoints | ✅ documented → key split in [05 §9](05-risk-and-safety.md#9-secrets--access) |

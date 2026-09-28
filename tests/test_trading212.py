@@ -96,3 +96,29 @@ def test_rate_limit_rejections_are_retried(monkeypatch):
     replies[:] = [400]
     with pytest.raises(T212Error):
         Trading212("k", "s").place_limit("SXR8d_EQ", 0.1, 700)
+
+
+def test_clock_skew_is_measured_only_on_a_fast_round_trip(monkeypatch):
+    """A slow request (a swapping laptop) once made a correct clock look 7 s off."""
+    import email.utils
+    import urllib.request
+
+    class Reply:
+        headers = {"Date": email.utils.formatdate(1000, usegmt=True)}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return b"{}"
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout: Reply())
+    for clock, expected in (([1000.0, 1000.0, 1014.0], None), ([1000.0, 1000.0, 1000.2], -0.4)):
+        ticks = iter(clock)
+        monkeypatch.setattr("time.time", lambda: next(ticks))
+        t = Trading212("k", "s")
+        t.summary()
+        assert t.skew == (None if expected is None else pytest.approx(expected))

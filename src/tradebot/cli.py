@@ -153,17 +153,35 @@ def _engine():
 
 
 def cmd_run(args) -> None:
-    from .live import MAX_SKEW_S, engine_alive
+    from . import notify
+    from .config import DB_PATH, ConfigError
+    from .live import MAX_SKEW_S
+    from .store import Store
+    from .watchdog import engine_alive
+    db, env = Store(DB_PATH), data.read_env()
+
+    def refuse(why: str):
+        notify.alert(db, env, f"engine refused to start: {why}")    # Task Scheduler retries every 5 minutes
+        sys.exit(why)
+
     if engine_alive():
-        sys.exit("another engine is running (its heartbeat is fresh): two engines would send duplicate orders")
-    eng = _engine()
-    eng.broker.summary()                                          # the first call also measures the clock skew
-    if abs(eng.broker.skew) > MAX_SKEW_S:
-        sys.exit(f"clock off by {eng.broker.skew:+.1f} s vs the broker: fix Windows time sync first (docs/05 §10)")
+        refuse("another engine is running (its heartbeat is fresh): two engines would send duplicate orders")
+    try:
+        eng = _engine()
+    except (ConfigError, SystemExit) as e:
+        refuse(str(e))
+    for _ in range(3):                                            # a clock sample needs a fast round trip
+        eng.broker.summary()
+        if eng.broker.skew is not None:
+            break
+    skew = eng.broker.skew
+    if skew is not None and abs(skew) > MAX_SKEW_S:
+        refuse(f"clock off by {skew:+.1f} s vs the broker: fix Windows time sync first (docs/05 §10)")
     eng.db.event("ENGINE_START", pid=os.getpid(), limits_hash=eng.risk_cfg["hash"], settings_hash=eng.settings["hash"],
-                 code=report.code_hash(), skew=round(eng.broker.skew, 2), kill_switch=risk.is_tripped())
+                 code=report.code_hash(), skew=skew if skew is None else round(skew, 2), kill_switch=risk.is_tripped())
     print(f"engine started (demo): limits {eng.risk_cfg['hash']}, code {report.code_hash()}, clock skew "
-          f"{eng.broker.skew:+.2f} s, kill switch {'TRIPPED' if risk.is_tripped() else 'off'}. Ctrl+C stops it.", flush=True)
+          f"{'unmeasured (slow network)' if skew is None else f'{skew:+.2f} s'}, "
+          f"kill switch {'TRIPPED' if risk.is_tripped() else 'off'}. Ctrl+C stops it.", flush=True)
     try:
         eng.loop()
     except KeyboardInterrupt:
@@ -171,22 +189,23 @@ def cmd_run(args) -> None:
 
 
 def cmd_stop(args) -> None:
-    from .live import STOP_FILE, TICK_S, engine_alive
+    from .live import STOP_FILE, TICK_S
+    from .watchdog import engine_alive
     STOP_FILE.touch()
-    print(f"stop requested: the engine exits within {TICK_S} s" if engine_alive() else "no running engine; stop file left for the next start to clear")
+    print(f"stop requested: the engine exits within {TICK_S} s; Task Scheduler starts it again within 5 minutes "
+          f"(Disable-ScheduledTask 'TradeBot engine' keeps it stopped)" if engine_alive() else
+          "no running engine; the stop file is cleared at the next start")
 
 
 def cmd_watchdog(args) -> None:
-    from . import notify
-    from .live import DB_PATH, watchdog
-    from .store import Store
-    db, env = Store(DB_PATH), data.read_env()
-    print(watchdog(_t212(), db, lambda t: notify.alert(db, env, t)))
+    from .watchdog import main as watchdog_main        # normally reached straight from __main__, without pandas
+    watchdog_main()
 
 
 def cmd_status(args) -> None:
-    from .live import DB_PATH, heartbeat
+    from .config import DB_PATH
     from .store import Store
+    from .watchdog import heartbeat
     db, k, hb, settings = Store(DB_PATH), risk.state(), heartbeat(), load_settings()
     print(f"mode: {settings.get('mode')}   kill switch: "
           + (f"TRIPPED ({k['reason']}, by {k['by']}, {k['ts']})" if k["tripped"] else "off"))
@@ -253,8 +272,9 @@ def cmd_reset_kill(args) -> None:
 def cmd_reconcile(args) -> None:
     from . import notify
     from .execution import sync
-    from .live import DB_PATH, engine_alive
+    from .config import DB_PATH
     from .store import Store
+    from .watchdog import engine_alive
     if engine_alive():
         sys.exit("the engine is running and reconciles on every sync: see `status`")
     db, env = Store(DB_PATH), data.read_env()
@@ -272,6 +292,8 @@ def cmd_report(args) -> None:
 
 
 def main() -> None:
+    for stream in (sys.stdout, sys.stderr):      # redirected to data\engine.log, Windows would use cp1252 and could
+        stream.reconfigure(encoding="utf-8", errors="replace")   # crash a sync on an odd character in an alert
     p = argparse.ArgumentParser(prog="tradebot")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("data", help="download/refresh market data and write a data-check report").set_defaults(fn=cmd_data)

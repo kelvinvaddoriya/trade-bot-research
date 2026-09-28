@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tradebot import data, live, risk
+from tradebot import data, live, risk, watchdog
 from tradebot.config import load_risk
 from tradebot.store import Store
 from test_execution import FakeT212
@@ -27,7 +27,7 @@ def bars(last: str, drift: float) -> pd.DataFrame:
 
 @pytest.fixture
 def engine(tmp_path, monkeypatch):
-    monkeypatch.setattr(live, "HEARTBEAT", tmp_path / "heartbeat.json")
+    monkeypatch.setattr(watchdog, "HEARTBEAT", tmp_path / "heartbeat.json")
     b = FakeT212()
     b.exchanges = lambda: [{"workingSchedules": [{"id": 166, "timeEvents": [
         e for d in DAYS for e in ({"date": T(d, 7).isoformat(), "type": "OPEN"}, {"date": T(d, 15, 30).isoformat(), "type": "CLOSE"})]}]}]
@@ -112,13 +112,13 @@ def test_watchdog_trips_on_a_dead_engine_only(engine):                         #
     eng, b, _ = engine
     b.place_limit("SXR8d_EQ", 0.3, 700.0)
     b.place_stop("SXR8d_EQ", -0.3, 650.0)
-    assert live.watchdog(b, eng.db, eng.alerts.append).startswith("engine not running")
-    live.beat("running")
-    assert live.watchdog(b, eng.db, eng.alerts.append).startswith("ok")
-    live.beat("stopped")
-    assert live.watchdog(b, eng.db, eng.alerts.append).startswith("engine not running")
-    live.HEARTBEAT.write_text(f'{{"ts": {time.time() - 90}, "pid": 1, "state": "running"}}')   # killed 90 s ago
-    assert live.watchdog(b, eng.db, eng.alerts.append).startswith("stale")
+    assert watchdog.check(b, eng.db, eng.alerts.append).startswith("engine not running")
+    watchdog.beat("running")
+    assert watchdog.check(b, eng.db, eng.alerts.append).startswith("ok")
+    watchdog.beat("stopped")
+    assert watchdog.check(b, eng.db, eng.alerts.append).startswith("engine not running")
+    watchdog.HEARTBEAT.write_text(f'{{"ts": {time.time() - 90}, "pid": 1, "state": "running"}}')   # killed 90 s ago
+    assert watchdog.check(b, eng.db, eng.alerts.append).startswith("stale")
     assert risk.state()["by"] == "watchdog" and [o["type"] for o in b.open.values()] == ["STOP"]
 
 
@@ -127,3 +127,12 @@ def test_engine_refuses_new_entries_while_tripped(engine):
     risk.trip("drill", by="operator")
     eng.sync(T((9, 30), 15, 55))
     assert not eng.db.events("type='CYCLE'") and not eng.db.select("orders")
+
+
+def test_the_watchdog_starts_without_pandas():
+    """It runs every minute; on a laptop short of memory, loading pandas made one run take over 5 minutes."""
+    import subprocess
+    import sys
+    out = subprocess.run([sys.executable, "-c", "import sys, tradebot.watchdog; print('pandas' in sys.modules)"],
+                         capture_output=True, text=True, check=True).stdout
+    assert out.strip() == "False"

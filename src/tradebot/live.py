@@ -4,14 +4,13 @@ Decisions are made after a session closes; the orders go out after the next open
 protective stops rests at the broker overnight, and a crash between close and open leaves nothing half-sent.
 
 The loop ticks every 20 s. A heartbeat thread writes data/heartbeat.json every 15 s while the loop keeps making
-progress, so a dead or hung engine goes stale and the watchdog trips the kill switch. Each sync (every 2 min
+progress, so a dead or hung engine goes stale and the watchdog (watchdog.py) trips the kill switch. Each sync (every 2 min
 while a traded market is open, else every 10 min): reconcile, and halt on a mismatch seen twice in a row (once
 could be a fill in flight) → keep protective stops right → send pending orders after the open → decision cycle
 once per session after the close → daily report after the US close → ping the dead-man's switch.
 """
 import datetime as dt
 import json
-import os
 import threading
 import time
 import traceback
@@ -20,17 +19,15 @@ from types import SimpleNamespace
 import pandas as pd
 
 from . import backtest, data, execution, notify, risk
-from .config import DATA_DIR, REPORTS_DIR
+from .config import DATA_DIR, DB_PATH, REPORTS_DIR  # noqa: F401  (DB_PATH used by the CLI)
 from .models import Position
 from .sizing import make_intent, size_entry
 from .strategies import STRATEGIES
 from .trading212 import current, last_closed, next_after, price, qty, sessions
+from .watchdog import beat
 
-HEARTBEAT = DATA_DIR / "heartbeat.json"
 STOP_FILE = DATA_DIR / "STOP"              # `python -m tradebot stop` asks the engine to exit cleanly
-DB_PATH = DATA_DIR / "demo.db"
 TICK_S, BEAT_S, HANG_S = 20, 15, 600
-STALE_S = 60                       # the watchdog runs every minute, so a dead engine is caught within 2 minutes
 SYNC_OPEN_S, SYNC_CLOSED_S = 120, 600
 OPEN_DELAY = dt.timedelta(minutes=2)       # let the opening auction finish before sending orders
 CLOSE_GUARD = dt.timedelta(minutes=10)     # no new orders in a session's last minutes
@@ -43,38 +40,6 @@ JUMP = 0.25                                # a bigger daily move is treated as a
 
 class RiskEngineError(Exception):
     pass
-
-
-# ---------- heartbeat & watchdog ----------
-
-def beat(state: str = "running") -> None:
-    HEARTBEAT.parent.mkdir(exist_ok=True)
-    HEARTBEAT.write_text(json.dumps({"ts": time.time(), "pid": os.getpid(), "state": state}), encoding="utf-8")
-
-
-def heartbeat() -> dict | None:
-    try:
-        return json.loads(HEARTBEAT.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return None
-
-
-def engine_alive() -> bool:
-    hb = heartbeat()
-    return bool(hb) and hb["state"] == "running" and time.time() - hb["ts"] <= STALE_S
-
-
-def watchdog(broker, db, alert) -> str:
-    """One check (Task Scheduler runs it every minute). A stale 'running' heartbeat means the engine died or hung:
-    trip the kill switch and cancel entry orders through our own broker session. Protective stops stay."""
-    hb = heartbeat()
-    if hb is None or hb["state"] != "running":
-        return "engine not running (stopped cleanly or never started)"
-    age = time.time() - hb["ts"]
-    if age <= STALE_S:
-        return f"ok: heartbeat {age:.0f} s old"
-    execution.halt(broker, db, f"watchdog: engine heartbeat {age:.0f} s old", alert, by="watchdog")
-    return f"stale ({age:.0f} s): kill switch tripped, entry orders cancelled"
 
 
 # ---------- decisions ----------
@@ -210,7 +175,7 @@ class Engine:
             execution.cancel_entries(self.broker, self.db)
         live_open = {self.tickers[s]["ticker"]: self.session_of(s, now) for s in self.live_syms}
         execution.ensure_stops(self.broker, self.db, self.alert, lambda tk: live_open.get(tk) is not None)
-        if abs(self.broker.skew) > MAX_SKEW_S:
+        if self.broker.skew is not None and abs(self.broker.skew) > MAX_SKEW_S:
             self.alert(f"clock off by {self.broker.skew:+.1f} s vs the broker: no new orders until time sync fixes it")
             return
         ready = {tk: s[0].date().isoformat() for tk, s in live_open.items()

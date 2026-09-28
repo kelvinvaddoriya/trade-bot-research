@@ -269,7 +269,7 @@ Invoked as `python -m tradebot <command>`.
 |---|---|
 | `backtest --strategy s2 --from 2010-01-01 --to 2019-12-31` | Runs a backtest and writes its report |
 | `run` | Starts the engine loop. Refuses unless `mode = "demo"`, the limits pass their bounds, the clock is within 2 s of the broker's, and no other engine has a fresh heartbeat |
-| `stop` | Asks the running engine to exit cleanly within 20 s (the watchdog then leaves it alone) |
+| `stop` | Asks the running engine to exit cleanly within 20 s (the watchdog then leaves it alone). Task Scheduler starts it again within 5 minutes, which is how code updates are loaded; `Disable-ScheduledTask "TradeBot engine"` keeps it stopped. |
 | `watchdog` | One watchdog check; Task Scheduler runs it every minute |
 | `status` | Shows mode, kill switch, heartbeat, last reconciliation, equity, cycle and report, open lots, open or pending orders, recent alerts |
 | `kill --reason "..."` | Trips the kill switch (HALT): cancels entry orders, keeps stops |
@@ -303,7 +303,8 @@ TradeBot/
     trading212.py             Trading 212 REST adapter (demo only), calendar from its schedules  [built P1]
     execution.py              order manager: submit-once, fills → lots, stops, reconciler, HALT  [built P1]
     backtest.py               historical daily loop + metrics          [built P0]
-    live.py                   engine loop, decision cycles, heartbeat, watchdog check, daily report  [built P1]
+    live.py                   engine loop, decision cycles, daily report                            [built P1]
+    watchdog.py               heartbeat + watchdog check; standard library only (runs every minute)  [built P1]
     store.py                  SQLite journal and ledger                [built P1]
     notify.py                 console / Telegram / dead-man's ping     [built P1]
     cli.py

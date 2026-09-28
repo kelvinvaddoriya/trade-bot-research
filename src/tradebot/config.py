@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = ROOT / "config"
 DATA_DIR = ROOT / "data"
 REPORTS_DIR = ROOT / "reports"
+DB_PATH = DATA_DIR / "demo.db"              # journal and ledger of the demo engine
 
 # (min, max). capital_cap_eur tops out at the owner's €1,000 decision: raising it needs a code change.
 BOUNDS = {
@@ -25,6 +26,19 @@ BOUNDS = {
 
 class ConfigError(Exception):
     pass
+
+
+def read_env() -> dict:
+    """Secrets from the git-ignored .env (docs/05 §9)."""
+    env = {}
+    path = ROOT / ".env"
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip().strip('"').strip("'")
+    return env
 
 
 def _load(path: Path) -> tuple[dict, str]:

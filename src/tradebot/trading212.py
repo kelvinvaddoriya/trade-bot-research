@@ -43,7 +43,7 @@ class Trading212:
         self.base = base
         self.auth = "Basic " + base64.b64encode(f"{key}:{secret}".encode()).decode()
         self.wait_until: dict[str, float] = {}
-        self.skew = 0.0                                     # local clock minus broker clock, seconds
+        self.skew: float | None = None                      # local clock minus broker clock, seconds (None: unmeasured)
 
     def _call(self, method: str, path: str, body: dict | None = None):
         ep = f"{method} {re.sub(r'/\d+', '/{id}', path.split('?')[0])}"
@@ -58,9 +58,12 @@ class Trading212:
             try:
                 with urllib.request.urlopen(req, timeout=20) as r:
                     self._note(ep, r.headers)
-                    if r.headers.get("Date"):                 # whole seconds: compare with the middle of that second
+                    t1 = time.time()
+                    # The Date header has whole seconds: compare its middle with the middle of the round trip. Only a
+                    # fast round trip says where that second was; a slow one (a swapping laptop) faked -7 s once.
+                    if r.headers.get("Date") and t1 - t0 < 1.0:
                         server = email.utils.parsedate_to_datetime(r.headers["Date"]).timestamp() + 0.5
-                        self.skew = (t0 + time.time()) / 2 - server
+                        self.skew = (t0 + t1) / 2 - server
                     raw = r.read()
                     return json.loads(raw) if raw else None
             except urllib.error.HTTPError as e:

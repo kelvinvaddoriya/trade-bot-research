@@ -50,14 +50,14 @@ The three P0 questions ([step 11](#step-11-backtest-results-and-the-p0-gate)) bl
 
 | # | Drill | Unit test | Against the demo API (2026-09-27, market closed) |
 |---|---|---|---|
-| 1 | Manual kill with orders open | ✅ entries cancelled, stop kept, no new entries | ✅ The entry order was cancelled at the broker and the ledger shows CANCELLED. After a restart the engine stayed halted. *Stops kept*: unit test only until there is a position. **Found a bug, fixed below.** |
+| 1 | Manual kill with orders open | ✅ entries cancelled, stop kept, no new entries | ✅ The entry order was cancelled at the broker and the ledger shows CANCELLED. After a restart the engine stayed halted. **Found a bug, fixed below.** *Stops kept*: ✅ 2026-09-28 with a real position (below). |
 | 2 | Kill the engine process | ✅ | ✅ Killed at 16:19:08 UTC; the watchdog tripped at 16:20:10 (62 s, so within 2 minutes when run every minute) |
 | 3 | Network cut during a submit | ✅ | ✅ Simulated at the socket. *Sent, answer lost:* found by lookup and adopted, 1 order at the broker. *Lost before sending:* two empty lookups, then exactly one resubmit. The lookup also ignored the identical-looking order already claimed by the first case. |
 | 4 | Stale data | ✅ waits until 15 min before the next open, then skips with an alert | ⏳ Unit test only; Yahoo's late closes (see the P1 preview) will likely trigger it for real |
 | 5 | Manual order in the account | ✅ | ✅ The mismatch was seen once, then HALT on the next sync; the unknown buy order was cancelled |
 | 6 | Out-of-bounds limit | ✅ (P0) | ✅ `run` refused: `capital_cap_eur=5000 outside [100, 1000]`; `risk.toml` restored |
 | 7 | LLM failure paths | — | P2 (no desk yet) |
-| 8 | Delete a protective stop | ✅ replaced, with an alert | ⏳ Needs a position: after S1's first fill (2026-10-01) |
+| 8 | Delete a protective stop | ✅ replaced, with an alert | ✅ 2026-09-28: the owner deleted it in the app; replaced within one sync, with a Telegram alert (below) |
 
 Plus a full-loop engine test: month-end close → planned entry → sent at the open → fill → stop at fill − 3×ATR → stop-out closes the lot → reconciliation OK.
 
@@ -79,6 +79,44 @@ Plus a full-loop engine test: month-end close → planned entry → sent at the 
 - `test_live.py` (7): the full loop, check days, drills 2, 4 and 5, drawdown.
 - Adapter tests: the calendar, `wait_final` reading history, 429 retries.
 - `conftest.py` keeps every test away from the real `data/KILL`.
+
+### Demo round trip, drills 1 and 8, and the first incident (2026-09-28)
+
+The owner asked for a demo trade while the market was open. A helper script sent a €25 SXR8 buy through the risk
+engine and wrote it into the ledger as a PENDING order, and left the rest to the running engine, the only process
+that sends orders. Nothing was sent from outside the engine.
+
+| Time (CEST) | What happened |
+|---|---|
+| 14:18 | Risk engine APPROVED: buy 0.0338 SXR8 at limit €738.11 (live price €730.80 + 1 %) = €24.95. The engine sent it at its next sync. |
+| 14:20 | **Filled at €731.80.** The same sync opened the lot and placed a **GTC stop at €709.88** (fill − 3 %), which Trading 212 accepted. |
+| 14:21 | **Drill 1, second half:** `kill` with the position open. After the engine's next sync the stop was still at the broker, the position was intact, and nothing new was sent. The kill switch was reset. |
+| 14:25 | **Drill 8:** the owner deleted the stop in the Trading 212 app. |
+| 14:26 | The engine saw it as CANCELLED in history, alerted on Telegram ("protective stop for SXR8 disappeared at the broker: replacing it") and had a new stop at €709.88 resting one second later. Reconciliation stayed OK. |
+| 14:28 | Exit planned: the engine cancelled the stop, then sent a market sell. |
+| 14:30 | **Sold at €731.74.** Lot closed, P&L −€0.002. Broker flat, reconciliation OK. |
+
+**Findings:**
+
+| Finding | Consequence |
+|---|---|
+| Trading 212 accepts `GOOD_TILL_CANCEL` stops from the API during the session | The protective-stop design works as specified |
+| The API reports sell orders with a **negative** quantity (−0.0338) plus `side: SELL` | The code already compares absolute quantities |
+| A demo market order was still NEW right after submission and FILLED by the next sync (within 2 minutes) | Exits confirm at the following sync, as designed |
+
+**Incident: the engine didn't come back after a restart (14:31–14:41).** I restarted the engine to load a small fix
+(UTF-8 console output, below). It refused to start: `clock off by -7.2 s vs the broker`. The clock was fine
+(−0.003 s against time.windows.com, −0.14 s against Trading 212 a minute later).
+
+- **Root cause:** the laptop was out of memory. Only 0.4 GB of 7.9 GB RAM was free and 21.5 GB was committed (Chrome, the Claude app, Acrobat), so Windows was paging hard. A fresh Python process loading pandas crawled. One watchdog run hung until Task Scheduler killed it after 5 minutes, and the next runs were refused while it hung (`0x800710E0`).
+- **How that became a false clock alarm:** the engine's first request to the broker took about 14 s. The clock skew is estimated from the middle of the round trip, so a slow round trip puts the estimate seconds off.
+- **Three weaknesses it exposed, all fixed:**
+  1. **Clock sample from a slow request.** The skew is now measured only from round trips under 1 s. The start-up check takes up to 3 samples, and an unmeasured skew doesn't block a start (every sync keeps checking). Test added.
+  2. **No restart and no alert.** Task Scheduler's "restart on failure" only covers a task that fails to launch, not a process that exits with an error, so the engine stayed down. The only signal was healthchecks.io's missed pings. Now a refused start sends a Telegram alert, and `ops/install-tasks.ps1` starts the engine every 5 minutes as well as at boot (a start is ignored while it runs).
+  3. **A heavy watchdog.** It went through the CLI, which imports pandas. It is now `watchdog.py`, standard library only, reached straight from `python -m tradebot watchdog`: 1.0 s instead of 8 s even with plenty of memory. Its time limit is now 2 minutes. A test checks that it doesn't import pandas.
+- **Also fixed:** the CLI now writes UTF-8 to `data/engine.log`. On Windows, redirected output used cp1252, and an alert containing a character outside it (for example from a broker error body) would have crashed that sync.
+- **Downtime:** 10 minutes during a session, with nothing pending. The engine was back at 14:41 on the old code and restarted at 14:44 on the fixed code.
+- **Lesson for the hosting decision ([09](09-hosting.md)):** the laptop's real risk is memory pressure from personal use, not CPU. Keep the browser and other heavy apps light while the engine runs, or move to the VPS sooner.
 
 ### What happens next
 
