@@ -118,6 +118,25 @@ that sends orders. Nothing was sent from outside the engine.
 - **Downtime:** 10 minutes during a session, with nothing pending. The engine was back at 14:41 on the old code and restarted at 14:44 on the fixed code.
 - **Lesson for the hosting decision ([09](09-hosting.md)):** the laptop's real risk is memory pressure from personal use, not CPU. Keep the browser and other heavy apps light while the engine runs, or move to the VPS sooner.
 
+### Incident 2: the laptop froze overnight and rebooted (2026-09-29)
+
+| Time (CEST) | What happened |
+|---|---|
+| 02:03 | Last successful sync. Flat, nothing pending. |
+| 02:07 onwards | The laptop was starved: Windows services timed out after 3 minutes, system components failed to register in time, and the per-user background-download queue (BITS) was full with 60 stuck Firefox updater jobs. Windows flagged a memory leak in Acrobat (02:11), then "suspected deadlock" (03:16, 09:55, 11:47). |
+| 02:03–12:12 | The engine journaled nothing, not even errors. The watchdog couldn't trip either: a machine that can't start processes can't run it. Only the external dead-man's switch (healthchecks.io) could notice, which is why it exists. |
+| 05:24–11:31 | Defender's network inspection service (NisSrv) and explorer.exe crashed repeatedly |
+| 12:12–14:55 | The engine was running again, but every sync failed with WinError 10053 / SSL EOF ("connection aborted by the software in your host machine"), consistent with the crashing network inspection service. Each failure alerted on Telegram (at most once an hour per text). |
+| 12:56 | Windows flagged a memory leak in Dropbox |
+| 14:26 | explorer.exe hung |
+| 14:58 | Hard reboot ("rebooted without cleanly shutting down first") |
+| 15:01 | The watchdog found the heartbeat from before the crash and tripped the kill switch, as designed |
+| 15:02 | Task Scheduler started the engine at boot. Reconciliation OK, flat. It holds in halted mode until a person resets the kill switch. |
+
+**Impact:** none on money. No positions or orders were open, and the demo book is at €1,000.00.
+**What worked:** the heartbeat, the watchdog trip after the reboot, the boot start, startup reconciliation, and the sticky kill switch (no automatic reset).
+**What this shows:** the laptop, not the engine, is the weak part. Memory leaks in desktop apps (Acrobat, Dropbox), crashing Defender components and a stuck Firefox updater took the whole machine down for 13 hours. The P1 gate needs 2 weeks of clean unattended runs; this laptop hasn't managed 2 days.
+
 ### What happens next
 
 | When | What |
