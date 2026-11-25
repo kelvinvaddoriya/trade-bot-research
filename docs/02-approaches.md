@@ -15,7 +15,7 @@ An LLM could sit at several points in that loop. This doc answers two questions:
 Hand-written, deterministic rules on prices and indicators, e.g. "hold while the close is above the 200-day average".
 
 - **+** Fully backtestable, deterministic, auditable, cheap and fast. Decades of research back a few robust families (trend, momentum, mean reversion).
-- **−** The edges are small and widely known. Parameters are easy to overfit. The rules ignore news and context.
+- **−** The edges are small and widely known. Parameters are easy to overfit. The rules ignore news and context. Recent empirical studies document heavy post-publication decay and cost erosion in high-turnover equity anomalies (Chen & Velikov 2023; Detzel, Novy-Marx & Velikov 2023) and post-2009 decay in short-term futures trend signals on small-tick contracts (Kurth et al. 2026), favouring slower horizons — though viability at our €1,000 cap must still be proven in our own backtests and forward checks.
 
 ### B. Supervised ML prediction
 
@@ -101,3 +101,9 @@ Moving up a level requires passing the gates in [06 §7](06-backtesting.md#7-pro
 - *Agentic Trading: When LLM Agents Meet Financial Markets* (2026). [arXiv:2605.19337](https://arxiv.org/abs/2605.19337)
 - López de Prado (2018). *Advances in Financial Machine Learning.* Wiley. Covers purged cross-validation and backtest overfitting.
 - Nof1 Alpha Arena, Season 1 (Oct–Nov 2025): [results summary](https://www.iweaver.ai/blog/alpha-arena-ai-trading-season-1-results/) · [ForkLog](https://forklog.com/en/four-out-of-six-ai-models-suffer-losses-in-trading-tournament/)
+- Chen, Velikov (2023). *Zeroing in on the Expected Returns of Anomalies.* *JFQA* (working paper [FEDS 2020-039](https://doi.org/10.17016/feds.2020.039), metadata/summary checked 2026-11-25; full text UNVERIFIED).
+- Detzel, Novy-Marx, Velikov (2023). *Model Comparison with Transaction Costs.* *Journal of Finance* 78(3), pp. 1743–1775 ([doi:10.1111/jofi.13225](https://doi.org/10.1111/jofi.13225), metadata/summary checked 2026-11-25; full text UNVERIFIED).
+- Kurth, Eisler, Rej, Bouchaud (2026). *Is Trend Still Your Friend?: A Microstructural Account of the Demise of Short-Term Trend-Following.* [arXiv:2607.01550](https://arxiv.org/abs/2607.01550) (abstract checked 2026-11-25; full PDF UNVERIFIED).
+- Sepp, Lucic (2026). *The Science and Practice of Trend-Following Systems.* [arXiv:2607.19497](https://arxiv.org/abs/2607.19497) (abstract checked 2026-11-25; full PDF UNVERIFIED).
+- Moskowitz, Sabbatucci, Tamoni, Uhl (2025). *Nonlinear Time Series Momentum.* [SSRN 5933974](https://doi.org/10.2139/ssrn.5933974) (metadata/summary checked 2026-11-25; full text UNVERIFIED).
+- López de Prado, Lipton, Zoonekynd (2025/2026). *How to Use the Sharpe Ratio.* *Journal of Portfolio Management* / [SSRN 5520741](https://doi.org/10.2139/ssrn.5520741) (metadata/summary checked 2026-11-25; full text UNVERIFIED).

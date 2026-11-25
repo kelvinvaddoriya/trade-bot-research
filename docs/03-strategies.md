@@ -52,6 +52,8 @@ The defaults below are starting points for the backtest, not tuned values. The p
 | Expected behaviour | Very few trades (a handful per quarter); smaller drawdowns than buy-and-hold; lags in V-shaped recoveries |
 | Why first | Robust, low turnover and simple, so it's ideal for proving the pipeline end to end |
 
+*2026-11-25 note:* In the filed S1 reports, the monthly-trailed `3 × ATR(20)` stop accounted for 200/210 in-sample (95.2 %), 88/89 holdout (98.9 %) and 25/27 recent (92.6 %) exits, raising turnover to ~5–7×/yr. S1's parameters remain frozen through P1–P2. Testing a non-trailing catastrophic broker stop (`S1b`, e.g. fixed −15 % or fixed `5 × ATR(20)` at entry alongside the trailing `3 × ATR(20)` baseline) is queued for a future rolling walk-forward study on 2007–2019 in-sample data (2020–2024 is already spent for S1).
+
 ### S2: Pullback in an uptrend (mean reversion), US + EU large caps
 
 This refines the PRD's Bollinger idea: it keeps the trend filter, makes exits volatility-aware, and adds a time stop.
@@ -72,16 +74,35 @@ This refines the PRD's Bollinger idea: it keeps the trend filter, makes exits vo
 | Expected behaviour | Many small wins and occasional larger losses. Roughly 8–12 entries a month across both markets, so it's the fastest to validate going forward. |
 | Known failure | Crashes that start inside an uptrend, before the filter reacts. The stop and the daily loss limit cover this. Earnings gaps are the LLM desk's job (R1). |
 
+*2026-11-25 status:* The original €400 / 14-stock US+EU spec failed the P0 gate. Since 2026-09-30, S2 runs experimentally in demo on a **€140** budget across the **18 German EUR stocks** (26 US+EU stocks appear in backtests only). Code defaults in `S2Pullback` remain `max_positions = 3` and `max_position_eur = €200` (while `config/risk.toml` comments `S2/S3/S4 <= 2 each`); aligning demo caps to `2 / €65` via an explicit override is pending owner decision. Candidate replacements (monthly EUR stock momentum or EUR UCITS dual momentum) are deferred until trial provenance, `€5` risk-cap compatibility and owner direction are resolved.
+
+### S3: Donchian breakout on stocks (experiment, 2026-09-30)
+
+- **Universe:** the stock list (18 German large caps live; US names in backtests only until orders can be priced in USD).
+- **Entry:** the close is above the highest high of the previous 20 sessions. The strongest breakouts (close ÷ prior high) fill free slots first.
+- **Exit:** the close is below the lowest low of the previous 10 sessions; protective stop at entry − 2 × ATR(20).
+- **Size:** €5 of risk between entry and stop, capped at €65 per position; at most 2 positions; €130 budget.
+- **Status:** experimental. It trades demo money without having passed the "Idea → Demo" gate, by owner decision, and can't go live without passing every gate.
+- **Universe note (2026-11-25):** The 2026-09-30 backtests used 26 US+EU stocks, whereas live demo trades only the 18 German EUR stocks. Any promotion test must run on the live EUR-18 universe.
+
+### S4: The monkey (random entries, the control group, 2026-09-30)
+
+- **Entry:** whenever a slot is free, a random stock from the universe. The draw is seeded by the date, so a backtest replays exactly what the engine did.
+- **Exit:** after 5 sessions, or at the protective stop at entry − 2.5 × ATR(14).
+- **Size:** as S3; €130 budget.
+- **Why:** it's the null hypothesis. A strategy that doesn't beat random entries with the same exits and costs has no edge, whatever its backtest looks like.
+- **Evaluation note (2026-11-25):** The 2026-09-30 backtest used 26 US+EU stocks and a single seed. Because a single seed is path-fragile, evaluate S4 in backtests as an ensemble of ≥ 50 seeds on the live EUR-18 universe.
+
 ### R1: LLM desk overlay (research, measured going forward only)
 
 This is not a strategy. It is the multi-model LLM desk ([08](08-multi-agent-llm.md)) reviewing **S2** entries against recent news and scheduled earnings. S1 entries skip it, because UCITS ETFs have no company news or earnings. It can only shrink or veto an entry. It can only be evaluated with the shadow A/B test ([06 §6](06-backtesting.md#6-evaluating-the-llm-desk-forward-only)), because it cannot be honestly backtested.
 
 ## 4. Portfolio construction
 
-- Each strategy has its own **budget** (S1 €600, S2 €400) and its own book in the journal, so P&L can be attributed to it.
-- If two strategies hold the same instrument, our ledger records two lots while the broker shows one net position. The ledger tracks lots per strategy, and reconciliation compares the net.
-- The risk engine's global caps ([05 §2](05-risk-and-safety.md#2-limits)) apply on top: capital deployed ≤ €1,000, at most 9 positions, and at most €250 per position.
-- Cash stays in EUR. USD for US stocks is converted per trade (Trading 212's 0.15 % FX fee), and that fee is part of the cost model.
+- Each strategy has its own **budget** and its own book in the journal, so P&L can be attributed to it. Since 2026-09-30, the active four-strategy demo split is S1 €600, S2 €140, S3 €130 and S4 €130 (€1,000 total).
+- Live execution enforces a shared-book exclusion (`taken`): only one strategy may hold or open a given ticker at a time. The ledger tracks lots per strategy, and reconciliation compares net quantities against the broker.
+- The risk engine's global caps ([05 §2](05-risk-and-safety.md#2-limits)) apply on top: capital deployed ≤ €1,000, at most 12 open positions (`config/risk.toml`), and at most €250 per position.
+- Live demo trades EUR instruments only (6 Xetra UCITS ETFs and 18 German EUR stocks) until USD order pricing and a second market cycle are implemented. Cash stays in EUR; any future USD API trades incur Trading 212's 0.15 % per-side FX fee in the cost model.
 
 ## 5. Costs and minimum order size
 

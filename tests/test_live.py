@@ -48,7 +48,7 @@ def test_full_loop_close_to_stop_out(engine):
     [o] = eng.db.select("orders")
     close = panel["SXR8"]["close"].iloc[-1]
     assert o["session"] == "2026-10-01" and o["price"] == pytest.approx(close * 1.01, abs=0.006)
-    assert o["qty"] * o["price"] == pytest.approx(250, abs=0.1)          # €600 × weight 1, capped at €250
+    assert o["qty"] * o["price"] == pytest.approx(250, abs=1.0)          # €600 × weight 1, capped at €250 (3-decimal steps)
     assert not b.open                                                     # nothing goes out overnight
 
     eng.sync(T((9, 30), 16, 5))                                           # the cycle runs once per session
@@ -136,3 +136,66 @@ def test_the_watchdog_starts_without_pandas():
     out = subprocess.run([sys.executable, "-c", "import sys, tradebot.watchdog; print('pandas' in sys.modules)"],
                          capture_output=True, text=True, check=True).stdout
     assert out.strip() == "False"
+
+
+def test_a_timed_pause_holds_until_its_time(tmp_path, monkeypatch):
+    monkeypatch.setattr(live, "STOP_FILE", tmp_path / "STOP")
+    assert live.paused_until() is None                                     # no stop file
+    live.STOP_FILE.write_text("{}")
+    assert live.paused_until() is None                                     # a plain stop: restart allowed
+    live.STOP_FILE.write_text(f'{{"until": {time.time() + 600}}}')
+    assert live.paused_until() > time.time()                               # starts before then exit quietly
+    live.STOP_FILE.write_text(f'{{"until": {time.time() - 1}}}')
+    assert live.paused_until() is None                                     # expired: the next start runs
+
+
+def test_one_book_one_owner_per_stock_and_bars_held(tmp_path):
+    from tradebot.strategies import S4Monkey
+    db = Store(tmp_path / "demo.db")
+    panel = {s: bars("2026-09-30", 0.001) for s in ("SAP", "SIE", "ALV")}
+    tickers = {s: {"ticker": f"{s}d_EQ", "schedule": 54} for s in panel}
+    lot = dict(qty=0.5, entry_price=120.0, stop_price=100.0, status="OPEN", pnl=0.0)
+    db.insert("lots", id="L1", strategy="s3_breakout", symbol="SAP", ticker="SAPd_EQ", entry_date="2026-09-24", **lot)
+    db.insert("lots", id="L2", strategy="s4_monkey", symbol="SIE", ticker="SIEd_EQ", entry_date="2026-09-24", **lot)
+    out = live.decide(db, S4Monkey(), panel, dt.date(2026, 9, 30), dt.date(2026, 10, 1), load_risk(), 130, tickers, False, set(panel))
+    # SIE was bought 5 sessions ago (24, 25, 28, 29, 30): time exit. SAP belongs to S3, so the free slot goes to ALV.
+    assert out["planned"] == ["exit SIE", "entry ALV"]
+
+
+def test_a_stock_strategy_waits_for_late_data_then_decides_without_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(watchdog, "HEARTBEAT", tmp_path / "heartbeat.json")
+    b = FakeT212()
+    b.exchanges = lambda: [{"workingSchedules": [{"id": 54, "timeEvents": [
+        e for d in DAYS for e in ({"date": T(d, 7).isoformat(), "type": "OPEN"}, {"date": T(d, 15, 30).isoformat(), "type": "CLOSE"})]}]}]
+    panel = {"SAP": bars("2026-09-30", 0.001), "SIE": bars("2026-09-29", 0.001)}           # SIE's close is late
+    monkeypatch.setattr(data, "refresh", lambda *a, **k: None)
+    monkeypatch.setattr(data, "load_panel", lambda inst, name: dict(panel))
+    settings = {**SETTINGS, "live": {**SETTINGS["live"], "strategies": ["s4_monkey"]}, "budgets_eur": {"s4_monkey": 130}}
+    inst = {s: {"strategy": ["s4_monkey"], "currency": "EUR"} for s in panel}
+    eng = live.Engine(b, Store(tmp_path / "demo.db"), {}, settings, inst, load_risk(), {s: {"ticker": f"{s}d_EQ", "schedule": 54} for s in panel})
+    eng.alerts = []
+    monkeypatch.setattr(eng, "alert", eng.alerts.append)
+    eng.sync(T((9, 30), 15, 55))
+    assert eng.db.events("type='STALE_DATA'") and not eng.db.events("type='CYCLE'")      # waits while there is time
+    eng.sync(T((10, 1), 6, 50))                                                            # deadline: decide without SIE
+    assert eng.db.events("type='CYCLE'")[0]["payload"]["planned"] == ["entry SAP"] and "deciding without SIE" in eng.alerts[0]
+
+
+def test_operator_catch_up_runs_s1_off_its_schedule(engine):
+    """2026-10-01: S1's month-end entries were cancelled by a kill-switch trip; the next check day was a month away."""
+    eng, b, panel = engine
+    panel.update(SXR8=bars("2026-10-01", 0.002), EXW1=bars("2026-10-01", -0.002))
+    eng.sync(T((10, 1), 15, 55))                               # the day after month-end: not a check day
+    assert not eng.db.select("orders")
+    eng.cycle("s1_trend", T((10, 1), 15, 56), force=True)
+    assert eng.db.events("type='CYCLE'")[-1]["payload"]["result"] == "done (operator catch-up)"
+    assert [o["symbol"] for o in eng.db.select("orders")] == ["SXR8"]
+
+
+def test_a_catch_up_asked_for_before_the_close_runs_at_the_next_cycle(engine):
+    eng, b, panel = engine
+    panel.update(SXR8=bars("2026-10-01", 0.002), EXW1=bars("2026-10-01", -0.002))
+    eng.db.event("CATCHUP_REQUESTED", "s1_trend", by="operator")     # what `cycle --force` records when it's too early
+    eng.sync(T((10, 1), 15, 55))
+    assert eng.db.events("type='CYCLE'")[-1]["payload"]["result"] == "done (operator catch-up)"
+    assert not eng.catch_up_requested("s1_trend")                     # consumed: the next day is normal again

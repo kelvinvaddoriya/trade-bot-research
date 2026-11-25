@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from tradebot.models import Position
-from tradebot.strategies import S1Trend, S2Pullback, is_period_end
+from tradebot.strategies import S1Trend, S2Pullback, S3Breakout, S4Monkey, is_period_end
 
 D = pd.Timestamp("2020-01-31")
 
@@ -84,3 +84,31 @@ def test_s2_exits_on_bounce_and_time_stop_and_frees_slots():
     sig = s.decide(D, rows, {"H1": pos("H1", bars=2), "H2": pos("H2", bars=10)})
     assert [(x.symbol, x.kind) for x in sig] == [("H1", "exit"), ("H2", "exit"), ("N", "entry")]
     assert "time stop" in sig[1].reason
+
+
+# ---- S3 ----
+
+def test_s3_breakout_enters_above_the_prior_high_and_exits_below_the_prior_low():
+    f = S3Breakout().features(bars([100.0] * 25 + [110.0]))
+    assert f["breakout"].iloc[-1] and not f["breakout"].iloc[-2]
+    rows = {"A": row(close=110, hi=101, lo=99, atr=2.0, breakout=True), "B": row(close=105, hi=100, lo=98, atr=1.0, breakout=True),
+            "C": row(close=90, hi=100, lo=95, atr=1.0, breakout=False)}
+    sig = S3Breakout().decide(D, rows, {"C": pos("C")})
+    assert [(x.symbol, x.kind) for x in sig] == [("C", "exit"), ("A", "entry"), ("B", "entry")]   # strongest first
+    assert sig[1].stop_distance == 4.0
+
+
+def test_s3_features_are_causal():
+    df = bars(list(np.random.default_rng(1).normal(0, 1, 80).cumsum() + 100))
+    pd.testing.assert_frame_equal(S3Breakout().features(df).iloc[:60], S3Breakout().features(df.iloc[:60]))
+
+
+# ---- S4 ----
+
+def test_s4_monkey_replays_the_same_picks_and_exits_on_time():
+    s, rows = S4Monkey(), {k: row(close=10.0, atr=0.5) for k in "ABCDEF"}
+    first = [x.symbol for x in s.decide(D, rows, {})]
+    assert len(first) == 2 and first == [x.symbol for x in s.decide(D, rows, {})]      # seeded by the date
+    sig = s.decide(D, rows, {"A": pos("A", bars=5), "B": pos("B", bars=2)})
+    assert [x.symbol for x in sig if x.kind == "exit"] == ["A"] and sum(x.kind == "entry" for x in sig) == 1
+    assert all(x.symbol not in ("A", "B") for x in sig if x.kind == "entry")

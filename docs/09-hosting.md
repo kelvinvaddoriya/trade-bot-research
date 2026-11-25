@@ -37,6 +37,23 @@ Measured on 2026-09-24: Intel Core i5-7200U (2 cores / 4 threads, a 2016 laptop 
 - **Pros:** always on; datacentre power and network; snapshots and backups; kept apart from personal use, which keeps keys safer; data stays in the EU.
 - **Cons:** €60–120 a year, which is 6–12 % of the €1,000 cap and counts as research cost. It also needs basic Linux administration.
 
+**Offers checked on 2026-10-06** (2 vCPU / 4 GB is plenty: the engine needs < 500 MB). Prices include 19 % VAT:
+
+| Provider and plan | Specs | No contract | With a contract | Locations orderable on 10-06 | Notes |
+|---|---|---|---|---|---|
+| **OVHcloud VPS-1** | 2 vCore, 4 GB, 40 GB NVMe | **€5.34/mo** | €4.53/mo on 12 months (paid upfront, renews automatically) | Strasbourg, Gravelines (FR); Limburg (DE) out of stock | Daily backup of the last 24 h included; no setup fee |
+| **netcup VPS 500 G12.5** | 2 vCore x86, 4 GB, 64 GB SSD | €9.50/mo | €8.26 (12 months), €7.03 (24 months) | Random EU site (AT/DE/NL), or Nuremberg for +€1.04 | German company; snapshots; no setup fee |
+| IONOS VPS M+ | 2 vCore, 4 GB, 120 GB NVMe | €4 for 3 months, then **€12/mo**, + €10 setup | Minimum terms not shown | EU, US, UK | Expensive after the intro price |
+| Contabo Cloud VPS 4 | 4 vCPU, 8 GB, 100 GB SSD | Not checked | €5.50/mo effective on 12 months | Not checked | The most RAM per euro; 12-month price |
+| Hetzner Cloud | CPX22: 2 vCPU, 4 GB | €19.99/mo excl. VAT (CPX22, as reported in September) | — | EU plans showed "currently unavailable" on 10-06 | The cheap CX/CAX line has been unavailable since early September 2026; Hetzner has limited capacity for new customers since 06-26 |
+
+**Choice: OVHcloud VPS-1 without a contract, in Strasbourg.** It's the cheapest option without a contract, includes a daily backup, and can be cancelled monthly. If the T212 or Yahoo data feeds misbehave from that IP range, netcup is the fallback.
+
+**Considered and rejected: the owner's idle tablet** (Redmi Pad Pro, 8 GB, Android/HyperOS).
+- It would avoid the laptop's memory problem, but the bot would run under Termux, and Android stops background apps; Xiaomi is among the most aggressive vendors.
+- It shares the laptop's home Wi-Fi and power, and would sit on the charger 24/7.
+- It can't hold live keys (no fixed IP), so it would mean a second migration before P3.
+
 ## 4. Comparison
 
 | | Laptop 24/7 | VPS | Hybrid (VPS runs the bot, laptop is for development) |
@@ -77,6 +94,19 @@ Measured on 2026-09-24: Intel Core i5-7200U (2 cores / 4 threads, a 2016 laptop 
 - [ ] Secrets via systemd credentials (`LoadCredential=`) or a root-owned file readable only by the service user, since the desktop keyring doesn't exist on a headless server.
 - [ ] Daily snapshot; journal exported off the machine.
 - [ ] Dead-man's switch moved to the VPS engine; drill 2 ([05 §11](05-risk-and-safety.md#11-drills-all-must-pass-before-each-promotion)) repeated on the VPS.
+
+## 8. Restart on the VPS (demo) — runbook (added 2026-11-25)
+
+This resumes the **demo**. Live keys and P3 need a separate owner decision. Steps marked **[owner]** are the owner's to do.
+
+1. **[owner]** Commit or back up the current working tree. Copy `data/` to the VPS: `demo.db`, `KILL`, `STOP`, `kill_log.jsonl`, `trials.jsonl`, `research.db`. Use the **demo** API key only, IP-restricted to the VPS, kept out of git.
+2. Deploy with `uv sync`, then `uv run pytest -q` on the VPS. Every test must pass.
+3. With `KILL` and `STOP` still in place, take a **read-only** broker inventory (positions, open orders, corporate actions since 2026-10-06) and compare it lot by lot with the ledger. Don't use `tradebot reconcile` for this step: it runs a sync that writes to the ledger and can trip the kill switch.
+4. Apply change sets A (atomic fills), B (protection and the restart rule, [04](04-architecture.md)), D (the Incident 3 fixes) and E (Linux paths, systemd units, credentials, backup) before starting any service.
+5. **[owner]** Decide each of the 8 lots: exit by rule (recommended; breached stops and overdue time exits), or keep the lot and re-stop it at a new level.
+6. With KILL **still tripped**, the recovery exits go through `kill --flatten` and fill at the next open. Every kept lot gets a confirmed protective stop. Check both against the broker.
+7. **[owner]** Only then: `reset-kill --who <owner> --reason "VPS migration; recovery done"`, remove `STOP`, and start the services.
+8. Run drills 1 and 8 again. The P1 gate clock starts at zero: 2 weeks of clean runs on the VPS.
 
 ## Sources
 

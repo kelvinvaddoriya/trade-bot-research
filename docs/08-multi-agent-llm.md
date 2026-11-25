@@ -12,7 +12,7 @@ Rankings change monthly, so the roster lives in config, not code. Scores are fro
 
 | Lab | Model | Index | List price (in / out per 1M tokens) | Notes |
 |---|---|---|---|---|
-| Anthropic | Claude Opus 5.5 | 58 (#1 overall) | $4 / $20 | Newly launched successor to Claude Opus 5 ($5 / $25) |
+| Anthropic | Claude Opus 5.5 | 59 | $4 / $20 | Newly launched successor to Claude Opus 5 ($5 / $25); no longer "#1 overall" — Claude Fable 5.2 (65) leads the index (AA leaderboard, checked 2026-11-25) |
 | Anthropic | Claude Fable 5.1 | 53 | $10 / $50 | Most capable widely released Claude; priced above Opus |
 | OpenAI | GPT-6 Astra | 53 | $10 / $50 | Released 2026-09-04 |
 | OpenAI | GPT-6 Sol | 48 | $2 / $10 | Released 2026-09-22 as the efficient tier |
@@ -25,8 +25,8 @@ Meta's Muse Spark 1.3 (index 48) is **not** open-weight, whatever some aggregato
 
 | Lab | Model | Licence | Notes |
 |---|---|---|---|
-| Z.ai | GLM-5.3 | Weights on Hugging Face since late Aug 2026; licence *(verify)*, GLM-5.2 was MIT | Tied for #1 open-weight model on the index; $1.40 / $4.40 |
-| Moonshot | Kimi K3 | Weights since 2026-07-27; revenue-tiered licence (fine for personal use) | Tied for #1 open-weight model; $3 / $15 |
+| Z.ai | GLM-5.3 | Weights on Hugging Face since late Aug 2026; licence *(verify)*, GLM-5.2 was MIT | No longer "tied for #1 open-weight": index 32 (AA leaderboard, checked 2026-11-25); $1.40 / $4.40 |
+| Moonshot | Kimi K3 | Weights since 2026-07-27; revenue-tiered licence (fine for personal use) | No longer "tied for #1 open-weight": Kimi K3.1 Pro is index 47 (AA leaderboard, checked 2026-11-25); $3 / $15 |
 | Alibaba | Qwen3.8 (open variants) | *(verify)* | "Qwen3.8 Max" is API-only |
 | DeepSeek | DeepSeek V4.1 Flash | MIT | 552B MoE with ~8–16B active; $0.30 / $1.20 at peak, half that off-peak; very cheap |
 
@@ -41,12 +41,14 @@ One model per lab, so their errors are as independent as possible, and an outage
 | Juror 1 | Claude Opus 5 (`claude-opus-5`). Opus 5.5 (#1 on the index) is a one-line config swap. | Paid | Top lab; reliable structured outputs |
 | Juror 2 | **GPT-6 Sol** (decided 2026-09-25) | Paid | Second lab. A fifth of Astra's price ($2 / $10 vs $10 / $50) for a short structured review; Astra runs once in the offline eval (§7) for comparison |
 | Juror 3 | Gemini 3.8 Flash (Grok 4.7 as alternate) | Paid, cheap | Third lab; fast |
-| Juror 4 | GLM-5.3 | Open-weight | Top open-weight model |
-| Juror 5 | Kimi K3 | Open-weight | Top open-weight model, different lab |
+| Juror 4 | GLM-5.3 | Open-weight | Selected for lab diversity (one model per lab), not ranking; subject to ZDR endpoint, licence and offline-eval checks |
+| Juror 5 | Kimi K3 | Open-weight | Selected for lab diversity, different lab; subject to the same endpoint, licence and offline-eval checks |
 | News analyst | DeepSeek V4.1 Flash | Open-weight (MIT) | Cheapest capable model; the only seat that reads raw internet text (§3) |
 | Reporter | Gemini 3.8 Flash | Paid, cheap | Writes explanations and the daily summary; decides nothing, so it doesn't need the strongest model |
 
 **Scope (decided 2026-09-25): the desk reviews S2 entries only.** S1 trades UCITS ETFs, which have no company news or earnings, on a slow monthly trend filter. Its entries go straight to the risk engine. That keeps cost down and focuses the desk's evaluation on the trades where news matters.
+
+**Open owner decision (2026-11-25):** S2-only at an assumed 5–8 eligible entries a month makes the veto-effect measure a multi-year shadow study. The owner may choose to also review S3 breakout entries (or an approved single-stock S2 replacement such as C1) to raise the reviewed-entry rate; S4 stays an unmodified control book unless scored offline/shadow-only. This is a scope decision, not a code change, and does not by itself raise the statistical power of the S2 measure.
 
 ## 3. Pipeline (per entry intent)
 
@@ -116,10 +118,11 @@ class NewsFindings(BaseModel):
 
 - **Paid labs use their native SDKs:** `anthropic`, `openai`, `google-genai`. Each supports schema-constrained output. For Claude that's structured outputs via `client.messages.parse()` with the Pydantic model. Our code validates every response with Pydantic regardless of provider.
 - **Open-weight models run on OpenRouter (decided 2026-09-25).** This PC (i5-7200U, 8 GB RAM, no GPU) can't run them, and the leading open models (500B–2.8T parameters) need multi-GPU servers ([09](09-hosting.md)). OpenRouter is OpenAI-compatible, so it works with the `openai` SDK and a different base URL.
-  - **Zero data retention enforced account-wide**, so requests only go to upstream providers that keep nothing.
+  - **Zero data retention enforced account-wide**, so requests only go to upstream providers that keep nothing. Every pinned open-weight checkpoint id must be confirmed ZDR-eligible on the day P2 starts; if a pinned id has no eligible route, the seat fails closed rather than silently dropping ZDR.
   - **Prepaid credits**, which act as a hard spending cap. There's no per-token markup, only a 5.5 % fee on credit purchases.
   - **Not EU-resident:** OpenRouter's EU in-region routing is limited to Business/Enterprise plans, so an individual account routes globally. That's acceptable here because prompts contain only public market data and intended trades, no personal data.
   - If a roster model has no ZDR-compliant endpoint, swap that seat for another open-weight model that has one (e.g. GLM-5.3-Flash) rather than turning ZDR off.
+  - **ZDR re-check (2026-11-25):** `z-ai/glm-5.3` (42), `moonshotai/kimi-k3.1-pro` (27) and `deepseek/deepseek-v4.1-flash-1017` (47) each have OpenRouter ZDR endpoints (live endpoint list, checked 2026-11-25). OpenRouter announced CSAM screening of ZDR traffic (2026-10-27), which can retain flagged content for review or legal preservation; "no impact on market-data prompts" is not a contractual guarantee. Native seats are governed by their own terms: Google AI Studio paid tier and the standard Anthropic API prohibit training but retain abuse/safety logs (Anthropic 30-day default; strict ZDR needs enterprise approval). The Google Vertex "Safety Retention since 2026-10-18" change is UNVERIFIED here.
   - **Rejected:** the labs' own APIs (DeepSeek, Z.ai, Moonshot). They're slightly cheaper, but their retention terms are weaker and data is processed in China, with nothing much to gain at this volume.
 - **No LiteLLM.** Its PyPI package was compromised in a supply-chain attack in March 2026. A system holding broker keys shouldn't depend on a multi-provider router library. Each adapter is ~30 lines, and all dependencies are pinned with hashes in `uv.lock`.
 - **Keys:** one per provider (or one for OpenRouter) in the OS keyring or systemd credentials, each with a **hard spend cap set in the provider's console**.
@@ -187,6 +190,8 @@ Per review, assuming ~5k input and ~2k output+thinking tokens per juror, ~8k/1k 
 | Kimi K3 ($3 / $15) | $0.045 |
 | DeepSeek V4.1 Flash, news ($0.30 / $1.20 peak) | $0.004 |
 | **Total** | **≈ $0.18** (≈ $0.30 with GPT-6 Astra) |
+
+All five jurors are reasoning models, so a review's real cost depends on the provider's `reasoning effort` and output-token cap, not just on the visible answer. Set these per provider (native `max_output_tokens` / `max_tokens` include reasoning tokens, not only visible output, and the field differs by SDK — OpenAI, Anthropic, Google and OpenRouter are configured separately), pin effort low, and apply a hard output-token cap. Without this, thinking tokens can dwarf the visible rationale and one review can cost several times the table figure. Low effort and a small cap are evaluation candidates, not proven quality settings. Log token usage and cost per call (`llm_calls`); the budget guard alerts before the monthly cap is exhausted. The table above is a dated estimate until each selected endpoint's price and capability are verified (checked 2026-11-25).
 
 **Monthly research budget (decided 2026-09-25):**
 

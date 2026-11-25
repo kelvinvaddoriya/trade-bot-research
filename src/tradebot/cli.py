@@ -10,7 +10,7 @@ from . import backtest, data, report, risk
 from .config import REPORTS_DIR, load_instruments, load_risk, load_settings
 from .strategies import STRATEGIES
 
-ALIASES = {"s1": "s1_trend", "s2": "s2_pullback"}
+ALIASES = {"s1": "s1_trend", "s2": "s2_pullback", "s3": "s3_breakout", "s4": "s4_monkey"}
 # Robustness ranges (docs/03 §3). The defaults sit in the middle of each range.
 GRIDS = {
     "s1_trend": {"sma_n": [150, 200, 250], "check": ["M", "W"], "atr_mult": [2.0, 3.0, 4.0]},
@@ -155,9 +155,12 @@ def _engine():
 def cmd_run(args) -> None:
     from . import notify
     from .config import DB_PATH, ConfigError
-    from .live import MAX_SKEW_S
+    from .live import MAX_SKEW_S, paused_until
     from .store import Store
     from .watchdog import engine_alive
+    if paused_until():
+        print(f"paused until {dt.datetime.fromtimestamp(paused_until()):%H:%M} (stop --until): not starting", flush=True)
+        return
     db, env = Store(DB_PATH), data.read_env()
 
     def refuse(why: str):
@@ -189,12 +192,25 @@ def cmd_run(args) -> None:
 
 
 def cmd_stop(args) -> None:
+    from .config import DB_PATH
     from .live import STOP_FILE, TICK_S
+    from .store import Store
     from .watchdog import engine_alive
-    STOP_FILE.touch()
-    print(f"stop requested: the engine exits within {TICK_S} s; Task Scheduler starts it again within 5 minutes "
-          f"(Disable-ScheduledTask 'TradeBot engine' keeps it stopped)" if engine_alive() else
-          "no running engine; the stop file is cleared at the next start")
+    until = None
+    if args.until:
+        h, m = map(int, args.until.split(":"))
+        until = dt.datetime.now().replace(hour=h, minute=m, second=0, microsecond=0)
+        if until <= dt.datetime.now():
+            sys.exit("--until must be later today (HH:MM, local time)")
+    STOP_FILE.write_text(json.dumps({"until": until.timestamp()} if until else {}), encoding="utf-8")
+    Store(DB_PATH).event("STOP_REQUESTED", until=until and until.isoformat(timespec="minutes"))
+    if until:
+        print(f"the engine exits within {TICK_S} s and stays stopped until {until:%H:%M}; the first scheduled start "
+              f"after that (every 5 minutes) brings it back")
+    else:
+        print(f"stop requested: the engine exits within {TICK_S} s; Task Scheduler starts it again within 5 minutes "
+              f"(use --until HH:MM to keep it stopped)" if engine_alive() else
+              "no running engine; the stop file is cleared at the next start")
 
 
 def cmd_watchdog(args) -> None:
@@ -282,6 +298,29 @@ def cmd_reconcile(args) -> None:
     print("reconciliation OK" if not problems else "MISMATCH:\n  " + "\n  ".join(problems))
 
 
+def cmd_cycle(args) -> None:
+    """Run a strategy's decision cycle now for the last closed session (after close + 20 min). --force also runs it
+    off its schedule: the catch-up when a check day's orders were lost. Orders go out at the next open, as usual."""
+    from .live import CYCLE_DELAY, LATE_LIMIT
+    from .trading212 import last_closed, next_after
+    name = ALIASES.get(args.strategy, args.strategy)
+    eng = _engine()
+    eng.calendar()
+    now = dt.datetime.now(dt.UTC)
+    sess = eng.cal[eng.tickers[next(iter(eng.universe(name)))]["schedule"]]
+    last = last_closed(sess, now)
+    nxt = last and next_after(sess, last[1])
+    if args.force and (last is None or now < last[1] + CYCLE_DELAY or (nxt and now >= nxt[0] + LATE_LIMIT)):
+        eng.db.event("CATCHUP_REQUESTED", name, by="operator")
+        print(f"queued: the engine runs {name} as a catch-up after the next close (+ {CYCLE_DELAY.seconds // 60} min); "
+              f"its orders go out at the following open")
+        return
+    before = len(eng.db.events("type='CYCLE' AND entity=?", name))
+    eng.cycle(name, dt.datetime.now(dt.UTC), force=args.force)
+    after = eng.db.events("type='CYCLE' AND entity=?", name)
+    print(after[-1]["payload"] if len(after) > before else "no cycle ran: before close + 20 min, already ran (use --force), or not a check day")
+
+
 def cmd_report(args) -> None:
     from .live import REPORT_SCHEDULE
     from .trading212 import last_closed
@@ -310,7 +349,9 @@ def main() -> None:
     g.set_defaults(fn=cmd_grid)
     sub.add_parser("t212-map", help="map whitelisted instruments to Trading 212 tickers").set_defaults(fn=cmd_t212_map)
     sub.add_parser("run", help="start the live engine (demo)").set_defaults(fn=cmd_run)
-    sub.add_parser("stop", help="ask the running engine to exit cleanly (no watchdog trip)").set_defaults(fn=cmd_stop)
+    s = sub.add_parser("stop", help="ask the running engine to exit cleanly (no watchdog trip)")
+    s.add_argument("--until", help="HH:MM local time: keep it stopped until then (Task Scheduler restarts it after)")
+    s.set_defaults(fn=cmd_stop)
     sub.add_parser("watchdog", help="one watchdog check (Task Scheduler runs it every minute)").set_defaults(fn=cmd_watchdog)
     sub.add_parser("status", help="kill switch, heartbeat, lots, orders, last events").set_defaults(fn=cmd_status)
     k = sub.add_parser("kill", help="trip the kill switch (HALT): cancel entries, keep stops")
@@ -323,5 +364,9 @@ def main() -> None:
     r.set_defaults(fn=cmd_reset_kill)
     sub.add_parser("reconcile", help="reconcile the ledger with the broker (engine stopped)").set_defaults(fn=cmd_reconcile)
     sub.add_parser("report", help="write the daily report for the last US session now").set_defaults(fn=cmd_report)
+    c = sub.add_parser("cycle", help="run a strategy's decision cycle for the last closed session now")
+    c.add_argument("--strategy", required=True, help="s1 | s2 | s3 | s4")
+    c.add_argument("--force", action="store_true", help="also off its schedule or if it already ran (operator catch-up)")
+    c.set_defaults(fn=cmd_cycle)
     args = p.parse_args()
     args.fn(args)

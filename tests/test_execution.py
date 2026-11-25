@@ -27,6 +27,8 @@ class FakeT212:
             raise TimeoutError()
         if isinstance(fail, int):
             raise T212Error(fail, "rejected")
+        if isinstance(fail, tuple):                       # (status, body): a specific broker answer
+            raise T212Error(*fail)
         self.next_id += 1
         o = {"id": self.next_id, "ticker": ticker, "quantity": abs(q), "side": "BUY" if q > 0 else "SELL", "type": type_,
              "status": "NEW", "filledQuantity": 0, "createdAt": dt.datetime.now(dt.UTC).isoformat(), **px}
@@ -250,3 +252,15 @@ def test_halt_cancels_entries_keeps_stops_and_blocks_new_entries(db, alerts):
     execution.execute_pending(b, db, alerts.append, {TK: "2026-10-02"})
     assert db.order("e4")["status"] == "PENDING" and [o["type"] for o in b.open.values()] == ["STOP"]
     assert execution.sync(b, db, alerts.append, pause=0) == [] and db.order("e2")["status"] == "CANCELLED"
+
+
+def test_quantity_precision_rejection_is_fixed_and_resent_without_counting_as_a_reject(db, alerts):
+    """2026-10-01: Trading 212 refused 2.4648 DTE with "invalid quantity precision 3"; three of those tripped the kill switch."""
+    b = FakeT212()
+    body = '{"type":"/api-errors/quantity-precision-mismatch","status":400,"detail":"invalid quantity precision 3"}'
+    for i in range(3):
+        b.fail = (400, body)
+        assert execution.submit(b, db, entry(db, key=f"e{i}", q=2.4648, limit=26.37), alerts.append, pause=0) == "NEW"
+    assert [o["quantity"] for o in b.open.values()] == [2.464] * 3 and not risk.is_tripped() and not alerts
+    assert db.order("e0")["qty"] == 2.464 and db.order("e0")["attempts"] == 1
+    assert [e["type"] for e in db.events("entity='e0'")][-3:] == ["QTY_PRECISION", "SUBMITTING", "SUBMITTED"]

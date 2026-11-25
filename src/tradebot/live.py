@@ -19,14 +19,14 @@ from types import SimpleNamespace
 import pandas as pd
 
 from . import backtest, data, execution, notify, risk
-from .config import DATA_DIR, DB_PATH, REPORTS_DIR  # noqa: F401  (DB_PATH used by the CLI)
+from .config import DATA_DIR, DB_PATH, REPORTS_DIR, trades  # noqa: F401  (DB_PATH used by the CLI)
 from .models import Position
 from .sizing import make_intent, size_entry
 from .strategies import STRATEGIES
-from .trading212 import current, last_closed, next_after, price, qty, sessions
+from .trading212 import ENTRY_DECIMALS, current, last_closed, next_after, price, qty, sessions
 from .watchdog import beat
 
-STOP_FILE = DATA_DIR / "STOP"              # `python -m tradebot stop` asks the engine to exit cleanly
+STOP_FILE = DATA_DIR / "STOP"              # `python -m tradebot stop [--until HH:MM]` asks the engine to exit cleanly
 TICK_S, BEAT_S, HANG_S = 20, 15, 600
 SYNC_OPEN_S, SYNC_CLOSED_S = 120, 600
 OPEN_DELAY = dt.timedelta(minutes=2)       # let the opening auction finish before sending orders
@@ -42,18 +42,27 @@ class RiskEngineError(Exception):
     pass
 
 
+def paused_until() -> float | None:
+    """`stop --until` keeps the engine down until then: Task Scheduler's starts before that time exit quietly."""
+    try:
+        until = json.loads(STOP_FILE.read_text(encoding="utf-8") or "{}").get("until")
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+    return until if until and until > time.time() else None
+
+
 # ---------- decisions ----------
 
-def suspect(panel: dict[str, pd.DataFrame], day: dt.date) -> list[str]:
+def suspect(panel: dict[str, pd.DataFrame], day: dt.date) -> dict[str, str]:
     """Symbols whose latest bar isn't the session that just closed, or that jumped more than 25 % (docs/05 §10)."""
-    out = []
+    out = {}
     for s, df in panel.items():
         last = df.index[-1].date()
         jump = abs(df["close"].iloc[-1] / df["close"].iloc[-2] - 1) if len(df) > 1 else 0.0
         if last != day:
-            out.append(f"{s}: last bar {last}")
+            out[s] = f"{s}: last bar {last}"
         elif jump > JUMP:
-            out.append(f"{s}: {jump:.0%} move")
+            out[s] = f"{s}: {jump:.0%} move"
     return out
 
 
@@ -75,19 +84,34 @@ def mark(db, cap: float, marks: dict[str, float]) -> dict:
 def decide(db, strat, panel: dict[str, pd.DataFrame], day: dt.date, next_day: dt.date, risk_cfg: dict,
            budget: float, tickers: dict, daily_loss_hit: bool, tradable: set[str]) -> dict:
     """One decision cycle on fresh bars of the session that just closed: signals → sizing → risk check, exactly as
-    in the backtest. Approved orders are planned for the next session; trails raise the lot's stop at once."""
+    in the backtest. Approved orders are planned for the next session; trails raise the lot's stop at once.
+
+    Several strategies share one €1,000 book: the risk state sees every open lot and planned entry (capital cap,
+    position count), while cash comes from this strategy's budget. A stock held or planned by another strategy is
+    off-limits, so each ticker has one owner and one protective stop."""
+    book = db.select("lots", "status='OPEN'")
+    planned = db.select("orders", "role='entry' AND status='PENDING'")
+    taken = {x["symbol"] for x in book + planned if x["strategy"] != strat.name}
+    panel = {s: df for s, df in panel.items() if s not in taken}
     rows = {s: SimpleNamespace(**strat.features(df).iloc[-1].to_dict(), fresh=True) for s, df in panel.items()}
     closes = {s: float(r.close) for s, r in rows.items()}
-    lots = {l["symbol"]: l for l in db.select("lots", "status='OPEN' AND strategy=?", strat.name)}
-    positions = {s: Position(s, l["qty"], l["entry_price"], dt.date.fromisoformat(l["entry_date"]), l["stop_price"])
+    lots = {l["symbol"]: l for l in book if l["strategy"] == strat.name}
+    positions = {s: Position(s, l["qty"], l["entry_price"], dt.date.fromisoformat(l["entry_date"]), l["stop_price"],
+                             bars_held=int((panel[s].index >= pd.Timestamp(l["entry_date"])).sum()) if s in panel else 0)
                  for s, l in lots.items()}
-    deployed = sum(l["qty"] * closes.get(s, l["entry_price"]) for s, l in lots.items())
+    own = sum(l["qty"] * closes.get(s, l["entry_price"]) for s, l in lots.items())
     equity = budget + sum(l["pnl"] or 0 for l in db.select("lots", "strategy=?", strat.name)) + sum(
         l["qty"] * (closes.get(s, l["entry_price"]) - l["entry_price"]) for s, l in lots.items())
     cap = risk_cfg["capital_cap_eur"]
     capital = min(cap, cap * equity / budget)                    # risk shrinks after losses, as in the backtest
-    st = risk.RiskState(mode="demo", day=day, held_qty={s: l["qty"] for s, l in lots.items()}, deployed_eur=deployed,
-                        cash_eur=equity - deployed, daily_loss_hit=daily_loss_hit,
+    held = {}
+    for x in book:
+        held[x["symbol"]] = held.get(x["symbol"], 0) + x["qty"]
+    for o in planned:
+        held.setdefault(o["symbol"], o["qty"])                   # a planned entry counts as a position
+    deployed = sum(x["qty"] * closes.get(x["symbol"], x["entry_price"]) for x in book) + sum(o["qty"] * o["price"] for o in planned)
+    st = risk.RiskState(mode="demo", day=day, held_qty=held, deployed_eur=deployed,
+                        cash_eur=equity - own, daily_loss_hit=daily_loss_hit,
                         seen_ids={r["intent_id"] for r in db.select("orders", "intent_id IS NOT NULL")},
                         orders_today=len(db.select("orders", "session=? AND role!='stop'", next_day.isoformat())),
                         last_bar={s: df.index[-1].date() for s, df in panel.items()}, last_close=closes, tradable=tradable)
@@ -121,7 +145,8 @@ def decide(db, strat, panel: dict[str, pd.DataFrame], day: dt.date, next_day: dt
             out["rejected"].append(f"{sig.symbol}: {dec.reason}")
             continue
         row = dict(key=intent.id, intent_id=intent.id, role=sig.kind, strategy=strat.name, symbol=sig.symbol,
-                   ticker=tickers[sig.symbol]["ticker"], session=next_day.isoformat(), qty=qty(intent.qty),
+                   ticker=tickers[sig.symbol]["ticker"], session=next_day.isoformat(),
+                   qty=qty(intent.qty, ENTRY_DECIMALS) if sig.kind == "entry" else qty(intent.qty),
                    type=intent.order_type, reason=sig.reason)
         if sig.kind == "entry":
             row.update(price=price(intent.limit_price), stop_distance=sig.stop_distance)
@@ -142,7 +167,8 @@ class Engine:
         self.broker, self.db, self.env = broker, db, env
         self.settings, self.inst, self.risk_cfg, self.tickers = settings, inst, risk_cfg, tickers
         self.live = settings["live"]["strategies"]
-        self.live_syms = [s for s, i in inst.items() if i["strategy"] in self.live]
+        self.live_syms = sorted({s for name in self.live for s in self.universe(name)})
+        self.refreshed: dict[tuple[str, dt.date], float] = {}
         self.symbol_of = {t["ticker"]: s for s, t in tickers.items()}
         self.cal, self.cal_at, self.last_problems = {}, 0.0, []
         self.progress, self.next_sync, self.stopping = time.time(), 0.0, False
@@ -150,6 +176,17 @@ class Engine:
 
     def alert(self, text: str) -> None:
         notify.alert(self.db, self.env, text)
+
+    def universe(self, name: str) -> dict:
+        """The instruments a strategy trades live: EUR only until orders can be priced in USD, and mapped to a ticker."""
+        return {s: i for s, i in self.inst.items()
+                if trades(i, name) and i["currency"] == "EUR" and self.tickers.get(s, {}).get("ticker")}
+
+    def refresh(self, syms: dict, day: dt.date) -> None:
+        """Download each symbol once per session and sync, however many strategies trade it."""
+        todo = {s: i for s, i in syms.items() if time.time() - self.refreshed.get((s, day), 0) > 300}
+        data.refresh(todo, day, self.settings["periods"]["data_start"], log=lambda m: None)
+        self.refreshed.update({(s, day): time.time() for s in todo})
 
     def calendar(self) -> None:
         if time.time() - self.cal_at > 6 * 3600:
@@ -187,34 +224,42 @@ class Engine:
                 self.cycle(name, now)
         self.report_if_due(now)
 
-    def cycle(self, name: str, now: dt.datetime) -> None:
-        """The strategy's decision cycle, once per session, after its close."""
-        syms = {s: i for s, i in self.inst.items() if i["strategy"] == name}
-        sess = self.cal[self.tickers[next(iter(syms))]["schedule"]]          # one market per strategy (S1: Xetra)
+    def cycle(self, name: str, now: dt.datetime, force: bool = False) -> None:
+        """The strategy's decision cycle, once per session, after its close. force (operator catch-up, e.g. after
+        S1's month-end orders were lost): run for the last closed session even if it isn't a check day or already ran."""
+        syms = self.universe(name)
+        if not syms:
+            return
+        sess = self.cal[self.tickers[next(iter(syms))]["schedule"]]          # one market per strategy (all Xetra now)
         last = last_closed(sess, now)
         if last is None or now < last[1] + CYCLE_DELAY:
             return
         day = last[0].date()
-        if self.db.events("type='CYCLE' AND entity=? AND json_extract(payload, '$.session')=?", name, str(day)):
+        if not force and self.db.events("type='CYCLE' AND entity=? AND json_extract(payload, '$.session')=?", name, str(day)):
             return
         nxt = next_after(sess, last[1])
         if nxt is None:
             self.alert(f"{name}: the calendar has no session after {day}")
             return
         if now >= nxt[0] + LATE_LIMIT:
-            self.db.event("CYCLE", name, session=str(day), result="missed (engine was down)")
-            self.alert(f"{name}: decision cycle for {day} missed (engine was down)")
+            if not force:
+                self.db.event("CYCLE", name, session=str(day), result="missed (not run by an hour after the next open)")
+                self.alert(f"{name}: decision cycle for {day} missed (not run by an hour after the next open)")
             return
+        force = force or self.catch_up_requested(name)
         strat = STRATEGIES[name]()
-        if not strat.is_check_day(pd.Timestamp(day), pd.Timestamp(nxt[0].date())):
+        if not force and not strat.is_check_day(pd.Timestamp(day), pd.Timestamp(nxt[0].date())):
             self.db.event("CYCLE", name, session=str(day), result="not a check day")
             return
-        data.refresh(syms, day, self.settings["periods"]["data_start"], log=lambda m: None)
-        panel = data.load_panel(self.inst, name)
+        self.refresh(syms, day)
+        panel = data.load_panel(syms, name)
         bad = suspect(panel, day)
-        if bad:
-            self.stale(name, day, nxt, bad, now)
+        if bad and (now < nxt[0] - dt.timedelta(minutes=15) or getattr(strat, "needs_all_bars", False)):
+            self.stale(name, day, nxt, list(bad.values()), now)          # wait for the data; S1 then skips the cycle
             return
+        if bad:                                                          # per-stock strategies decide without them
+            self.alert(f"{name} {day}: deciding without {'; '.join(bad.values())} (stale or suspect data)")
+            panel = {s: df for s, df in panel.items() if s not in bad}
         closes = {s: float(df["close"].iloc[-1]) for s, df in panel.items()}
         m = mark(self.db, self.risk_cfg["capital_cap_eur"], closes)
         if self.drawdown_hit(m):
@@ -227,9 +272,15 @@ class Engine:
         except RiskEngineError as e:
             execution.halt(self.broker, self.db, f"risk engine error: {e}", self.alert)
             return
-        self.db.event("CYCLE", name, session=str(day), result="done", **out)
+        self.db.event("CYCLE", name, session=str(day), result="done (operator catch-up)" if force else "done", **out)
         if out["planned"] or out["rejected"]:
             self.alert(f"{name} {day}: planned {out['planned'] or 'nothing'}; rejected {out['rejected'] or 'nothing'}")
+
+    def catch_up_requested(self, name: str) -> bool:
+        """`cycle --force` asked for too early (before a close) is queued: the next cycle runs as a catch-up."""
+        asked = self.db.events("type='CATCHUP_REQUESTED' AND entity=?", name)
+        done = self.db.events("type='CYCLE' AND entity=? AND json_extract(payload, '$.result')='done (operator catch-up)'", name)
+        return bool(asked) and (not done or asked[-1]["id"] > done[-1]["id"])
 
     def stale(self, name: str, day: dt.date, nxt, bad: list[str], now: dt.datetime) -> None:
         """Wait for the data until shortly before the next open, then skip the cycle (docs/05 §10)."""
@@ -267,10 +318,10 @@ class Engine:
             return []
         lines = ["| Strategy | Role | Backtest trades | Backtest P&L | Backtest holds | Engine holds | Check |", "|---|---|---|---|---|---|---|"]
         for name in self.live + self.settings["live"].get("shadow", []):
-            syms = {s: i for s, i in self.inst.items() if i["strategy"] == name}
-            data.refresh(syms, day, self.settings["periods"]["data_start"], log=lambda m: None)
+            syms = self.universe(name) if name in self.live else {s: i for s, i in self.inst.items() if trades(i, name)}
+            self.refresh(syms, day)
             budget = self.settings["budgets_eur"][name]
-            res = backtest.run(STRATEGIES[name](), data.load_panel(self.inst, name), self.inst, budget, start, str(day),
+            res = backtest.run(STRATEGIES[name](), data.load_panel(syms, name), self.inst, budget, start, str(day),
                                self.settings["costs"], self.risk_cfg)
             pnl = res.equity.iloc[-1] - budget if len(res.equity) else 0.0
             if name in self.live:
@@ -301,6 +352,12 @@ class Engine:
              f"- Book: equity €{m['equity']:,.2f} of the €{self.risk_cfg['capital_cap_eur']:,} cap; day change €{m['day_change']:+.2f}; "
              f"peak €{m['peak']:,.2f}; drawdown {dd:.1%}",
              f"- Last reconciliation: {'OK' if recon[0]['payload']['ok'] else recon[0]['payload']}",
+             f"- Clean runs are what P1 is judged on; the strategies below are demo experiments, not advice", "",
+             "| Strategy | Budget | Open lots | Closed trades | Winners | Realised P&L |", "|---|---|---|---|---|---|",
+             *[f"| {n} | €{self.settings['budgets_eur'][n]} | {sum(l['status'] == 'OPEN' for l in ls)} "
+               f"| {sum(l['status'] == 'CLOSED' for l in ls)} | {sum(l['status'] == 'CLOSED' and (l['pnl'] or 0) > 0 for l in ls)} "
+               f"| €{sum(l['pnl'] or 0 for l in ls):+.2f} |"
+               for n in self.live for ls in [self.db.select("lots", "strategy=?", n)]], "",
              f"- Limits hash `{self.risk_cfg['hash']}`, settings hash `{self.settings['hash']}`", "",
              "## Open lots", ""]
         L += ["| Lot | Symbol | Qty | Entry | Stop | Mark |", "|---|---|---|---|---|---|"] + [
@@ -355,5 +412,6 @@ class Engine:
             with self.lock:
                 self.stopping = True
                 beat("stopped")
-            STOP_FILE.unlink(missing_ok=True)
+            if paused_until() is None:                    # a timed pause must outlive this process
+                STOP_FILE.unlink(missing_ok=True)
             self.db.event("ENGINE_STOP")

@@ -137,6 +137,125 @@ that sends orders. Nothing was sent from outside the engine.
 **What worked:** the heartbeat, the watchdog trip after the reboot, the boot start, startup reconciliation, and the sticky kill switch (no automatic reset).
 **What this shows:** the laptop, not the engine, is the weak part. Memory leaks in desktop apps (Acrobat, Dropbox), crashing Defender components and a stuck Firefox updater took the whole machine down for 13 hours. The P1 gate needs 2 weeks of clean unattended runs; this laptop hasn't managed 2 days.
 
+### Demo experiments: four strategies, 18 stocks (2026-09-30)
+
+The owner asked for more trading: "take multiple trades, fail-pass and learn … take different approaches, different stocks". Demo money is the right place for that, so the rules changed for demo only. The guardrails didn't: the €1,000 cap, the risk engine, protective stops and the kill switch all apply as before, and no strategy can go live without passing the gates in [06 §7](06-backtesting.md#7-promotion-gates).
+
+| Strategy | Approach | Universe (live) | Budget | Gate status |
+|---|---|---|---|---|
+| S1 trend | Trend-following, monthly | 6 UCITS ETFs | €600 (unchanged) | Passed |
+| S2 pullback | Mean reversion (RSI(2) < 10 in an uptrend) | 18 German stocks | €140 | Failed in P0; now trades as an experiment |
+| S3 breakout | Donchian 20/10 breakout (new, [03](03-strategies.md#s3-donchian-breakout-on-stocks-experiment-2026-09-30)) | same 18 | €130 | Never gated: experiment |
+| S4 monkey | Random entries, 5-day hold (new): the control group | same 18 | €130 | Control |
+
+**Changes:**
+- **12 more German large caps**, all Xetra in EUR, mapped by ISIN (all 32 instruments map):
+  - Adidas, Infineon, Deutsche Bank, Mercedes-Benz (`DAId_EQ`), BASF and Rheinmetall;
+  - Airbus, DHL (`DPWd_EQ`), Bayer, E.ON, Deutsche Börse and Siemens Energy.
+
+  US names stay in backtests only: their orders would need USD prices and a second market's cycle.
+- **An instrument can serve several strategies** (`strategy` is a list in `instruments.toml`).
+- **One book:**
+  - The risk engine now sees every strategy's open lots and planned entries for the capital cap and the position count; cash still comes from each strategy's budget.
+  - **A stock held or planned by one strategy is off-limits to the others**, so each ticker has one owner and one protective stop.
+- **Live positions count days held**, which S2's time stop and S4's 5-day hold need.
+- **Stale data per stock:** S1 still skips its whole cycle when any ETF's bar is missing, because its weights span all six. The stock strategies wait for late data until 15 minutes before the next open, then decide without the late or suspect symbols, with an alert.
+- **Limits** (hash `1e6f13262ebd`): at most 12 positions (was 9) and 20 orders a day (was 10).
+- **The daily report** now has one results row per strategy: open lots, closed trades, winners and realised P&L.
+- **`stop --until HH:MM`** for planned pauses (used for the owner's interview on 2026-09-29).
+
+**Backtests before any demo money (2007–2019, all stocks including US names in EUR; single runs, in-sample):**
+
+| Strategy | CAGR | at 2× costs | Sharpe | Max DD (of its budget) | Trades | 2025 → now |
+|---|---|---|---|---|---|---|
+| S2 pullback | +1.5 % | −6.0 % | 0.17 | −41 % | 812 | +12.0 % |
+| S3 breakout | +5.0 % | +3.4 % | 0.35 | −47 % | 236 | +31.5 % (34 trades) |
+| S4 monkey | +1.4 % | −12.2 % | 0.16 | −54 % | 1,121 | +9.3 % |
+
+- **First lesson, before a single trade:** S2's pullback rule does about as well as random entries with the same size and stops. Its "edge" looks like chance.
+- S3 beats the monkey and survives doubled costs, but with a Sharpe of 0.35 (± ~0.3) it isn't significant.
+- The drawdowns look large because each sleeve is small: a €65 position is half of a €130 budget. In euros, S4's worst drawdown was about €70 over 13 years.
+- The live run will show whether any of this holds up.
+
+**Dry run** (the real code on real data for 2026-09-29, against a copy of the ledger, nothing sent):
+- S2 would have bought BASF (€91, stop distance 5.5 %).
+- S4 would have picked Munich Re and Siemens (€65 each).
+- S3 had no breakout.
+
+**Deployed** at 13:18 CEST with a clean stop and the scheduled restart: limits `1e6f13262ebd`, code `9b74d98887a5`. Each new strategy logged one "missed" cycle for 2026-09-29, since it wasn't live then, and sent one alert each: first-start noise.
+
+**Tests:** 90, including S3 signals and causality, the monkey's replayable picks and time exit, the shared book with one owner per stock and days held, and deciding without a late stock at the deadline.
+
+### First experiment orders, and the quantity-precision trip (2026-10-01)
+
+The laptop's lid was closed overnight. The engine kept running (lid set to "do nothing" on AC): 307 clean reconciliations, no gaps.
+
+| Time (CEST) | What happened |
+|---|---|
+| 09-30 17:51 | The first real cycles. **S1** (month-end) planned SXR8 €210, EXW1 €160, SXRV €129 and IS3N €101; EUNH and 4GLD weren't in trend. **S4** picked Deutsche Telekom and Allianz (€65 each). S2 and S3 had no signal. |
+| 10-01 09:04 | Orders sent. Accepted: SXR8 0.2834, SXRV 0.0828, Allianz 0.1545. **Rejected:** DTE 2.4648, EXW1 2.5077 and IS3N 2.0681, each with HTTP 400 `quantity-precision-mismatch: invalid quantity precision 3`. |
+| 09:04:18 | **Three rejections in a row tripped the kill switch**, as designed. HALT cancelled the open entries (SXR8, SXRV), but Allianz had already filled at €410.80. |
+| 09:10 | Allianz's lot opened (S4) and its protective stop went in at €392.71. Reconciliation OK. |
+
+**Root cause:** the bot sized every quantity to 4 decimals. Trading 212 accepts fewer for some instruments: all three rejections were orders over one share of instruments under €100. The instrument metadata has no precision field; the error message names the precision it accepts.
+
+**Fix (deployed 12:23, code `b1999a9d447a`, 92 tests):**
+- New entries are sized to 3 decimals. Stops and exits keep the broker's own fill quantity.
+- If Trading 212 still rejects a quantity's precision, the order is rounded down to the precision named in the error and sent again once. That's safe because a 400 means nothing was placed, and it's journaled as `QTY_PRECISION`. It no longer counts toward the "3 rejections" kill rule, because the corrected order goes through.
+
+**The kill switch did its job:** a systematic order error stopped all new trading within 14 seconds, and the one filled position kept its stop.
+**What it cost:** S1's month-end entries. Under S1's rule, the next check day is 30 October. The new operator command `cycle --strategy s1 --force` runs a strategy's decision for the last closed session off its schedule, through the same risk checks and journaled as a catch-up. Run after today's close, S1 enters tomorrow at the open, one day later than its backtest. The forward check will show that gap honestly.
+
+**Follow-up (13:17–13:24):** the owner reset the kill switch, then ran the catch-up before the close. At that point the last closed session was 09-30, whose decision window had shut at 10:00. Nothing was planned, but the engine logged a misleading "missed (engine was down)". Two changes, deployed at 13:23 (code `59f65a4524ba`, 93 tests):
+- A `cycle --force` that's too early is now **queued**: the engine runs the strategy as a catch-up at its next cycle.
+- The "missed" message now says what happened ("not run by an hour after the next open").
+
+S1's catch-up is queued for today's close; its orders go out on 10-02 at about 09:02.
+
+### Incident 3: out of memory again, kill switch trip, and shutdown until the server (2026-10-06)
+
+The owner saw the bot "stopping and restarting". It wasn't: the engine had run as one process (PID 14828) since 10-01 13:23.
+
+| Time (CEST) | What happened |
+|---|---|
+| 14:56–19:47 | 12 syncs failed with dropped connections (`WinError 10053`, `SSL: UNEXPECTED_EOF`). Each failure sent a Telegram alert and a healthchecks.io `/fail` ping, so the check flipped DOWN, then UP at the next good sync. That flapping is what looked like restarts. Every sync after a failure recovered on its own. |
+| 16:53 | The heartbeat was 72 s old, so the **watchdog tripped the kill switch**. The engine came back by itself 2 minutes later, but the kill switch stays tripped until a human resets it, so the 10-06 decision cycles didn't run. All 8 lots kept their stops. |
+| ~19:45 | While I was diagnosing: 0.36 GB of 7.9 GB RAM free, ~6,000 page reads a second, the engine paged out to 4 MB, and a ~7-minute heartbeat stall. The watchdog's previous run had been stopped by its 2-minute limit. |
+
+**Root cause: memory, as on 09-28.** The laptop was also running an Android emulator (Pixel_8, ~5.8 GB, started at 15:12 and again at 19:02), Android Studio/Gradle (~1.9 GB), Claude, ChatGPT, Codex and Dropbox. Under that much paging, HTTPS requests to the broker time out and break, and the engine's heartbeat stalls.
+
+**Weaknesses this exposed (not fixed yet):**
+- One dropped connection on a read-only request fails the whole sync.
+- Every failed sync pings healthchecks `/fail`.
+- Telegram's one-per-hour limit only matches identical text, so variants of the same network error all get through.
+- `engine.log` has no timestamps.
+
+**Owner decision (19:50): shut everything down; restart it on a rented EU server** ([09 §3](09-hosting.md#3-a-small-eu-vps)), which this third laptop incident in 9 days brings forward from P3. What I did:
+1. **Engine stopped cleanly** at 19:57 (heartbeat `stopped`, so no watchdog trip). `data/STOP` holds a pause until 2030-01-01, so a scheduled start exits with "paused … not starting" (seen at 19:58). Afterwards the owner disabled all three scheduled tasks (engine, watchdog, backup) in an elevated PowerShell and paused the healthchecks.io check. No TradeBot process is running.
+2. **All 8 protective stops cancelled** (ALV, BAYN, BMW, SXR8, EXW1, IS3N, SXRV, IFX), each confirmed CANCELLED by the broker and recorded in the ledger (`CANCEL_ALL` event). The broker shows no open orders, and the ledger has none left to do.
+3. **Left as they are:**
+   - The 8 positions stay open at the broker **without stops**.
+   - The kill switch stays tripped.
+   - On a restart the engine would reconcile and place new stops at each lot's stop price once their market opens.
+
+### Research round with five agents (2026-11-25)
+
+The owner asked for a multi-agent research round under the agents' handbook (`D:\TradeBot\Agent-Guide.md`, rewritten today: votes, file locks, project rules no vote can override). Claude orchestrated Codex, Antigravity, Mistral and Deepseek in four rounds: research → cross-review and vote → amendment acceptance → verification. All reports and the synthesis are in [`reports/research/2026-11-25/`](../reports/research/2026-11-25/00-synthesis.md).
+
+**Key findings:**
+- The current system (S3/S4, 18 stocks, Incident 3) is **uncommitted**; the last commit is 42792f1.
+- 5 of the 8 open demo lots are below their old stop prices (Yahoo, 2026-11-25).
+- Restarting as-is would re-place those stops above the market.
+- Applying a fill isn't one atomic transaction, and partial fills break P&L and stop sizing (Codex audit, reproduced).
+- S2's code caps (3/€200) don't match its €140 budget.
+- S1's stop makes 95–99 % of its exits.
+- The S3/S4 backtests used 26 US+EU stocks, while live trades 18 German stocks.
+- The LLM desk's P2 needs months to years, not 8 weeks.
+
+**Applied:** 42 doc edits from 20 proposals that passed the handbook vote (≥ 2 approvals from other agents, amendments accepted by their authors, no open factual objection), across README, docs/01–09 and `3paperresearch.md`. They include a planned-shutdown rule ([05 §4](05-risk-and-safety.md)), a restart recovery design ([04](04-architecture.md), not implemented) and the VPS restart runbook ([09 §8](09-hosting.md)). Rejected or withdrawn: Mistral's VPS prices and runbook (wrong figures, live-money framing, invented APIs) and Claude's netcup correction (Claude misread the billing term). **No code, config, order or safety-state change.** `uv run pytest -q`: 93 passed.
+
+**Open for the owner:** commit the tree; decide the 8 lots; S2's caps; the order of code change sets A/B/D/C/E; the ambiguous-submit policy; the promotion-gate review; the desk scope ([synthesis §3](../reports/research/2026-11-25/00-synthesis.md)).
+
 ### What happens next
 
 | When | What |

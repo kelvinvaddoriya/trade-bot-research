@@ -10,6 +10,7 @@
 - halt():     the kill switch's HALT: trip (persisted first), cancel entry orders, keep protective stops.
 """
 import datetime as dt
+import re
 import time
 import urllib.error
 
@@ -102,6 +103,14 @@ def _lost(broker, db, r: dict, alert) -> str:
     return "NOT_FOUND"
 
 
+def _precision_fix(r: dict, e: T212Error) -> float | None:
+    """Trading 212's 400 "quantity-precision-mismatch" names the number of decimals it accepts for that instrument
+    (2026-10-01: "invalid quantity precision 3"). Returns the quantity rounded down to it, or None."""
+    m = re.search(r"quantity precision (\d+)", e.body) if e.status == 400 and "quantity-precision" in e.body else None
+    fixed = qty(r["qty"], int(m.group(1))) if m else None
+    return fixed if fixed and fixed < r["qty"] else None
+
+
 def submit(broker, db, r: dict, alert, pause: float = 10.0) -> str:
     """Send one ledger order with the submit-once protocol. Returns its new status."""
     key = r["key"]
@@ -115,6 +124,11 @@ def submit(broker, db, r: dict, alert, pause: float = 10.0) -> str:
     try:
         o = _place(broker, r)
     except T212Error as e:
+        fixed = _precision_fix(r, e)
+        if fixed is not None:                              # nothing was placed; T212 named the precision it accepts
+            db.update("orders", key, qty=fixed, status="PENDING", attempts=r["attempts"] - 1)
+            db.event("QTY_PRECISION", key, sent=r["qty"], resent=fixed, detail=e.body[:200])
+            return submit(broker, db, db.order(key), alert, pause)
         if e.status < 500:                                 # the broker said no: nothing was placed
             db.update("orders", key, status="BROKER_REJECTED", done=1)
             db.event("BROKER_REJECTED", key, status=e.status, body=e.body)

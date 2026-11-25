@@ -3,12 +3,16 @@ mode = "demo"                  # backtest | shadow | demo | live. The live engin
 
 [live]                         # the P1 demo engine (docs/10, P1)
 start = "2026-09-28"           # first session of the demo run; the daily forward check backtests from here
-strategies = ["s1_trend"]      # trade on the Trading 212 practice account
-shadow = ["s2_pullback"]       # decisions only, no orders: S2 failed its gate (owner decision, 2026-09-27)
+# All four trade demo money (owner, 2026-09-30: "take multiple trades, fail-pass and learn"). S1 passed its gate;
+# S2 failed it, S3 and S4 were never gated: they are experiments, and none of them can go live without the gates.
+strategies = ["s1_trend", "s2_pullback", "s3_breakout", "s4_monkey"]
+shadow = []
 
-[budgets_eur]                  # per-strategy share of the €1,000 cap (docs/03 §4). S2's €400 stays unused in demo.
-s1_trend = 600
-s2_pullback = 400
+[budgets_eur]                  # per-strategy share of the €1,000 cap (docs/03 §4)
+s1_trend = 600                 # unchanged: S1 runs as backtested
+s2_pullback = 140              # 2026-09-30: S2's former €400 is split across the three experiments
+s3_breakout = 130
+s4_monkey = 130
 
 [costs]                        # per side, fraction of notional (docs/06 §2.3)
 eu_slippage = 0.0010           # EU stocks & UCITS ETFs: half-spread + slippage

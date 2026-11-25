@@ -14,7 +14,7 @@ import urllib.request
 import numpy as np
 import pandas as pd
 
-from .config import DATA_DIR, read_env  # noqa: F401  (read_env re-exported for callers)
+from .config import DATA_DIR, read_env, trades  # noqa: F401  (read_env re-exported for callers)
 
 DB = DATA_DIR / "research.db"
 UA = {"User-Agent": "Mozilla/5.0 (TradeBot research; personal use)"}
@@ -215,7 +215,7 @@ def load_panel(instruments: dict, strategy: str, con=None) -> dict[str, pd.DataF
     fx = load_fx(con)
     panel = {}
     for sym, inst in instruments.items():
-        if inst["strategy"] != strategy:
+        if not trades(inst, strategy):
             continue
         own = _eur_adjusted(usable(load_bars(con, "yahoo", inst["yahoo"])), inst["currency"], fx)
         if inst.get("native_from"):

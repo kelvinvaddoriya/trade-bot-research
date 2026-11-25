@@ -2,16 +2,17 @@
 # Values outside the bounds in src/tradebot/config.py make the engine refuse to start.
 
 capital_cap_eur = 1000         # sizing uses min(broker equity, cap); same in demo and live
-max_positions = 9              # S1 <= 6, S2 <= 3
+max_positions = 12             # S1 <= 6, S2/S3/S4 <= 2 each (2026-09-30: demo experiments)
 max_position_eur = 250
 min_order_eur = 20
 risk_per_trade_pct = 0.005     # of the cap: €5
 max_daily_loss_pct = 0.02      # €20 → halt entries for the day
 max_drawdown_pct = 0.10        # €100 → kill switch
-max_orders_per_day = 10
+max_orders_per_day = 20
 max_orders_per_minute = 2
 price_collar_pct = 0.02
 allow_short = false
 whitelist = ["SXR8", "SXRV", "EXW1", "IS3N", "EUNH", "4GLD",
              "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "JPM", "XOM",
-             "SAP", "SIE", "ALV", "DTE", "MUV2", "BMW"]
+             "SAP", "SIE", "ALV", "DTE", "MUV2", "BMW",
+             "ADS", "IFX", "DBK", "MBG", "BAS", "RHM", "AIR", "DHL", "BAYN", "EOAN", "DB1", "ENR"]

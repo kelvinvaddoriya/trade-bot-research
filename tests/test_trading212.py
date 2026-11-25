@@ -20,7 +20,7 @@ def test_live_url_is_refused():
 
 
 def test_quantity_rounds_down():
-    assert qty(0.04129999) == 0.0412 and qty(1.0) == 1.0
+    assert qty(0.04129999) == 0.0412 and qty(1.0) == 1.0 and qty(2.4648, 3) == 2.464 and qty(2.4648, 2) == 2.46
 
 
 def test_ticker_mapping_by_isin_currency_and_venue():

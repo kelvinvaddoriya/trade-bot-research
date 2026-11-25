@@ -43,6 +43,8 @@
 
 Every report shows results at 1× and 2× costs.
 
+Trading 212's Public API executes orders in the account's primary currency with no multi-currency wallet routing ([Trading 212 API overview](https://docs.trading212.com/api/instruments/exchanges) · [Help Centre](https://helpcentre.trading212.com/hc/en-us/articles/1500001809042-Multi-currency-accounts), checked 2026-11-25), so USD API trades always incur the 0.15 % FX fee per side. Keep the standard 2× all-cost run unchanged for historical comparability; optionally report a separate labeled `2× slippage + 1× FX` sensitivity run alongside it.
+
 ### 2.4 Splits
 
 - **In-sample** (development): start of data → 2019-12-31.
@@ -56,10 +58,13 @@ Every report shows results at 1× and 2× costs.
 - Monte Carlo: reshuffle the trade sequence 1,000 times to get a distribution of maximum drawdown and final equity.
 - Subperiods: returns per year. No single year may contribute more than 50 % of total profit.
 - Market split for S2: US and EU results reported separately.
+- Random-entry control (`S4`): evaluate against an ensemble of ≥ 50 seeds (median and 95th percentile Sharpe and CAGR), not a single seed.
 
 ### 2.6 Trial log
 
 Every backtest run (strategy, parameters, period, git commit, metrics) is appended to `data/trials.jsonl`. The trial count feeds the deflated Sharpe ratio.
+
+**Data provenance and the trial inventory (added 2026-11-25).** Each research run must identify an immutable, consistent snapshot of bars and FX plus its native/proxy definitions, universe, parameters, source/config hashes, dependency versions, execution/cost policy and runner hash. The trial record and report reference the same manifest ID. Runtime refreshes may update the live cache but must not overwrite the inputs of an already reported experiment. Repeating an experiment on revised data is a separately identified run, with differences disclosed. A snapshot supports reproducibility; it does not establish historical point-in-time availability. Every exploratory variant, seed, fold and cost scenario is recorded, including ad-hoc runs that bypass the normal report writer. Reconstruct the 2026-11-25 unlogged trials as late registrations, preserving their actual known execution/registration dates and marking unavailable inputs/results UNVERIFIED; never describe them as prospectively registered. Do not assert a complete trial count, effective independent search count or definitive DSR until the search inventory is reconciled. Reproductions and sensitivity runs remain distinguishable from genuinely new selection opportunities. *(Implementing snapshots and manifest fields needs separate code proposals and tests.)*
 
 ## 3. Metrics
 
@@ -82,13 +87,15 @@ What this means:
 - Weeks or months of forward demo results **cannot** prove profitability. They verify the *implementation* (fills, costs and behaviour match the backtest), not the edge.
 - The edge is judged on long backtests plus the holdout. Forward trading checks that live results ≈ the backtest.
 - Trade-level statistics need at least 100 trades (S2, in backtest). Always report the trade count next to a win rate.
-- After many trials, use the deflated Sharpe ratio (Bailey & López de Prado 2014).
+- Report the Probabilistic Sharpe Ratio `PSR(0)`, the Deflated Sharpe Ratio `DSR` (Bailey & López de Prado 2014; López de Prado, Lipton & Zoonekynd 2025/2026, [SSRN 5520741](https://doi.org/10.2139/ssrn.5520741), metadata checked 2026-11-25, full text UNVERIFIED), and the Minimum Track Record Length `MinTRL(95 %, 0)`. `DSR` is valid only over a complete, reconciled trial family (including any ad-hoc runs) and should note effective independent trials `N_eff` when trials are correlated.
 
 ## 5. Forward testing (shadow & demo)
 
 - **Shadow:** live data, with orders simulated by `SimBroker` using the backtest's execution model. This tests the pipeline without any broker.
 - **Demo:** the Trading 212 practice account, sized to the €1,000 cap.
 - **Tracking check:** replay the same period in the backtester and compare trade by trade. Signals must match 100 %; a signal mismatch is a bug. Report fill-price differences (mean, max) and the P&L difference.
+- **Shared-book replay vs independent baseline:** when multiple strategies share one book and ticker-ownership lock, keep two clearly labeled checks: (a) the **independent sleeve baseline** (each strategy alone on its live EUR universe, used for P0 research and ≥ 50-seed S4 null benchmarks), and (b) the **shared-book portfolio replay** (the P1/P2 implementation check). The shared-book replay starts from each strategy's actual activation/restart epoch and initial holdings/cash, runs exits before entries at the open, applies venue rounding, tracks `bars_held` from actual fill dates, and runs close decisions in fixed `settings.live.strategies` priority order while excluding symbols owned or pending-entry by another strategy (`taken`). Tag cross-strategy exclusions (`COLLISION`), `KILL` windows and operator catch-ups (`operator_event`) explicitly, and pass the same `taken`-filtered universe and date seed to S4.
+- **Clean-start rule after multi-day outages:** do not drop a multi-day unhedged shutdown gap and stitch forward-check series across it. Preserve the prior record intact in the journal and reports, resolve stale positions under owner authorization, and restart the forward-check clock (`live.start`) from zero.
 
 ## 6. Evaluating the LLM desk (forward only)
 
@@ -117,6 +124,11 @@ The desk moves to `affects_orders = true` only with ≥ 50 reviewed entries, vet
 | Demo → Gated live (P2 → P3) | ≥ 8 weeks of demo trading; 100 % signal match with the backtest replay; slippage within the cost model; zero unexplained orders; all drills ([05 §11](05-risk-and-safety.md#11-drills-all-must-pass-before-each-promotion)) passed; engine moved to the VPS ([09](09-hosting.md)); owner decision to use real money |
 | Gated → Bounded autonomy (P3 → P4) | ≥ 4 weeks live with approvals; zero guardrail breaches; zero unexplained orders; live ≈ backtest replay; owner decision |
 | Any → Stop | Drawdown kill switch; live results materially worse than the backtest replay for 3 months; a broker or terms change |
+
+**Proposed gate review items (pending owner decision; the table above remains in force):**
+- Require promotion backtests to run on the exact live-tradable universe rather than a mixed US+EU universe when live is EUR-only.
+- On a 5-year holdout, the isolated `holdout Sharpe >= 0.5 × IS Sharpe` criterion has `SE ≈ 0.45` under i.i.d. assumptions, giving high single-criterion false-positive and false-negative rates; review adding an in-sample Sharpe floor, `PSR(0)` / `DSR` over a reconciled trial family, and an explicit max-drawdown ratio vs the benchmark.
+- For slow strategies (such as monthly S1, where 8 weeks is only 1–2 checks), review adding a minimum number of completed decision cycles alongside the 8-week demo soak, and note that demo ETF fills do not validate live spreads.
 
 ## 8. Backtest report template
 

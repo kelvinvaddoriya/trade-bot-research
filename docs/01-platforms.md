@@ -56,6 +56,7 @@ Strongly preferred at €1,000: zero or near-zero commission, fractional shares,
 - One commission-free account covers US stocks, EU stocks and UCITS ETFs. USD stocks carry a 0.15 % FX fee each way.
 - **Tax:** since 5 January 2026, Trading 212 withholds German capital-gains tax, solidarity surcharge and church tax automatically. Its German accounts run through a partnership with FXFlat, a German broker. Before P3, confirm the live account is on this setup and file a Freistellungsauftrag if the app offers one.
 - **Constraints:**
+  - Fractional quantity precision varies by instrument (incident-derived; not a documented rule). The 2026-10-01 demo incident rejected four-decimal quantities for DTE, EXW1 and IS3N; new entries now use ENTRY_DECIMALS=3; outgoing stop/exit quantities use the four-decimal helper, with a separate error-driven correction path. No universal price-based precision rule is established; the engine employs dynamic precision fallback.
   - The API is in beta: endpoints and rate limits change. The adapter honours the rate-limit headers, and adapter tests run against demo.
   - There's no historical price data in the API, so data comes from separate sources (§6).
   - Community reports say positions not opened through the API can't be closed through it. **The bot's account must hold only bot positions.** Keep manual investing elsewhere, e.g. the existing Trade Republic account.

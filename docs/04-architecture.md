@@ -101,7 +101,7 @@ sequenceDiagram
 | ~17:50 (Xetra close + 20 min) | EU decision cycle (S1): fresh bars, signals, sizing, risk checks; orders planned for the next open |
 | ~22:30 (US close + 30 min) | Daily report, with the forward check and the S2 shadow book |
 
-The sessions come from Trading 212's exchange schedules, so holidays, half days and daylight-saving changes need no code. S2 runs in shadow only (owner decision, [10](10-build-log.md#p1-shadow--demo-engine-built-2026-09-27)), so P1 has no US cycle.
+The sessions come from Trading 212's exchange schedules, so holidays, half days and daylight-saving changes need no code. The current demo (since 2026-09-30) enables S1, S2, S3 and S4 on mapped EUR instruments, so P1 has no US cycle. The stock strategies share ticker ownership, with S2 before S3 before S4 in the configured decision order. US symbols remain research-only. The implementation has outstanding shared-book reservation and recovery defects, documented in the [2026-11-25 code audit](../reports/research/2026-11-25/codex-code-audit.md). Independent per-strategy backtests are baselines, not exact portfolio replays.
 
 **Order style (P1, 2026-09-27):** decisions are made after the close, and the orders go out 2 minutes after the next open. Entries are DAY **limit** orders at the last close + 1 %, so a gap up of more than 1 % leaves the order resting unfilled instead of paying up. Exits are market orders, sent after the lot's stop is cancelled. Protective stops are GTC; the engine places or replaces them (cancel, then place) only while the market is open, so a trail decided at the close takes effect at the next open. Trading 212 does queue orders placed while the market is closed, but sending at the open means nothing except stops rests at the broker overnight, a crash between close and open leaves nothing half-sent, and a kill switch at night has no queued entries to chase. One difference from the backtest remains: an entry that doesn't fill at the open keeps resting for the rest of the day, while the backtest counts it as unfilled.
 
@@ -130,7 +130,7 @@ class RiskDecision:
 # Review: see §6. NewsFindings: see 08 §4. Order, Fill and Lot mirror the broker fields plus intent_id, broker order id, strategy, lot_id.
 ```
 
-Money and quantities use `Decimal`, because fractional shares and small amounts make float rounding visible. `OrderIntent.id` is a deterministic hash of `(strategy, symbol, side, bar_ts)`, so the same signal can never produce a second intent.
+The sketch above planned `Decimal`; the code uses Python `float` and SQLite `REAL`, rounding at the boundaries (quantities to the venue's precision when an order is sized and sent). The submit-once protocol writes its intent before a request goes out, but applying a fill is not yet one atomic transaction (code audit, 2026-11-25). `OrderIntent.id` is a deterministic hash of `(strategy, symbol, side, bar_ts)`, so the same signal can never produce a second intent.
 
 **Submit-once protocol.** Trading 212's API has no client order reference, and its docs warn that repeating a request may create a duplicate order. So:
 
@@ -269,7 +269,7 @@ Invoked as `python -m tradebot <command>`.
 |---|---|
 | `backtest --strategy s2 --from 2010-01-01 --to 2019-12-31` | Runs a backtest and writes its report |
 | `run` | Starts the engine loop. Refuses unless `mode = "demo"`, the limits pass their bounds, the clock is within 2 s of the broker's, and no other engine has a fresh heartbeat |
-| `stop` | Asks the running engine to exit cleanly within 20 s (the watchdog then leaves it alone). Task Scheduler starts it again within 5 minutes, which is how code updates are loaded; `Disable-ScheduledTask "TradeBot engine"` keeps it stopped. |
+| `stop [--until HH:MM]` | Asks the running engine to exit cleanly within 20 s (the watchdog then leaves it alone). Task Scheduler starts it again within 5 minutes, which is how code updates are loaded. With `--until`, starts before that time exit quietly, so the engine stays down for a planned pause. |
 | `watchdog` | One watchdog check; Task Scheduler runs it every minute |
 | `status` | Shows mode, kill switch, heartbeat, last reconciliation, equity, cycle and report, open lots, open or pending orders, recent alerts |
 | `kill --reason "..."` | Trips the kill switch (HALT): cancels entry orders, keeps stops |
@@ -279,6 +279,12 @@ Invoked as `python -m tradebot <command>`.
 | `report` | Writes the daily report for the last US session now |
 | `approve <id>` / `decline <id>` | Human gate from the terminal (P3; Telegram buttons too) |
 | `desk-eval` | Runs the offline desk eval set (P2, [08 §7](08-multi-agent-llm.md#7-evaluation)) |
+
+**Restart after a long pause: proposed recovery design, not implemented (2026-11-25).** Today, `ensure_stops()` re-places each lot's stop at its stored price and doesn't compare it with the market. The proposed design:
+1. With KILL still tripped, take a fresh broker inventory (positions, open orders, corporate actions) and reconcile the remaining quantity of every lot.
+2. The owner decides each lot. For a lot whose stop is already breached, the engine journals `STOP_THROUGH_ON_RESTART` and the exit runs through the existing `kill --flatten` path, which is allowed while KILL is tripped. An overdue time exit (S2's time stop, S4's 5-day hold) is a separate, explicit decision.
+3. A lot that is kept gets a confirmed protective stop before anything else happens.
+4. KILL is reset only after that, and never just to let the recovery exits through.
 
 ## 10. Repository layout
 

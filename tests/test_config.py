@@ -55,4 +55,4 @@ def test_hash_ignores_line_endings(tmp_path):
     lf, crlf = tmp_path / "lf.toml", tmp_path / "crlf.toml"
     lf.write_bytes(src)
     crlf.write_bytes(src.replace(b"\n", b"\r\n"))
-    assert load_risk(lf)["hash"] == load_risk(crlf)["hash"] == "eff24a142253"
+    assert load_risk(lf)["hash"] == load_risk(crlf)["hash"]

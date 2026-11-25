@@ -5,6 +5,7 @@ Each strategy has two parts, used identically by the backtest and (from P1) the 
 - decide(day, rows, positions, check_day): pure rule on the latest feature row per symbol.
   rows[sym].fresh is True when that symbol traded on `day` (False on its exchange's holidays).
 """
+import random
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -23,6 +24,7 @@ def is_period_end(day: pd.Timestamp, next_day: pd.Timestamp | None, period: str)
 class S1Trend:
     """Trend filter on UCITS ETFs: hold while close > SMA(200), checked monthly; inverse-volatility weights."""
     name: ClassVar[str] = "s1_trend"
+    needs_all_bars: ClassVar[bool] = True     # weights span the universe: one stale symbol skips the whole cycle
     sma_n: int = 200
     atr_n: int = 20
     atr_mult: float = 3.0
@@ -124,4 +126,81 @@ class S2Pullback:
         return sig
 
 
-STRATEGIES = {"s1_trend": S1Trend, "s2_pullback": S2Pullback}
+@dataclass
+class S3Breakout:
+    """Donchian breakout (turtle-style): buy a close above the prior 20-day high, sell a close below the prior 10-day
+    low, with an ATR protective stop. Experimental: trades demo money without having passed the backtest gate
+    (owner decision 2026-09-30)."""
+    name: ClassVar[str] = "s3_breakout"
+    entry_n: int = 20
+    exit_n: int = 10
+    atr_n: int = 20
+    atr_mult: float = 2.0
+    max_positions: int = 2
+    max_position_eur: float = 65.0
+
+    def features(self, df: pd.DataFrame) -> pd.DataFrame:
+        f = pd.DataFrame({"close": df["close"]}, index=df.index)
+        f["hi"] = df["high"].rolling(self.entry_n).max().shift(1)          # prior bars only: causal
+        f["lo"] = df["low"].rolling(self.exit_n).min().shift(1)
+        f["atr"] = ind.atr(df["high"], df["low"], df["close"], self.atr_n)
+        f["ready"] = f[["hi", "lo", "atr"]].notna().all(axis=1)
+        f["breakout"] = f["ready"] & (f["close"] > f["hi"])
+        return f
+
+    def is_check_day(self, day, next_day) -> bool:
+        return True
+
+    def decide(self, day, rows: dict[str, pd.Series], positions: dict[str, Position], check_day: bool = True) -> list[Signal]:
+        sig, exiting = [], 0
+        for s in positions:
+            r = rows.get(s)
+            if r is not None and r.fresh and r.ready and r.close < r.lo:
+                sig.append(Signal(self.name, s, "sell", "exit", day, f"close below the {self.exit_n}-day low", r.close))
+                exiting += 1
+        free = self.max_positions - (len(positions) - exiting)
+        cands = sorted((-(r.close / r.hi - 1), s) for s, r in rows.items() if s not in positions and r.fresh and r.breakout)
+        for strength, s in cands[:max(free, 0)]:
+            r = rows[s]
+            sig.append(Signal(self.name, s, "buy", "entry", day, f"breakout: {-strength:.1%} above the {self.entry_n}-day high",
+                              r.close, stop_distance=self.atr_mult * r.atr, rank=strength))
+        return sig
+
+
+@dataclass
+class S4Monkey:
+    """The control group: a random stock whenever a slot is free, held `hold` bars or until the ATR stop. The pick is
+    seeded by the date, so a backtest replays exactly what the engine did. A strategy that can't beat this has no edge."""
+    name: ClassVar[str] = "s4_monkey"
+    hold: int = 5
+    atr_n: int = 14
+    atr_mult: float = 2.5
+    max_positions: int = 2
+    max_position_eur: float = 65.0
+
+    def features(self, df: pd.DataFrame) -> pd.DataFrame:
+        f = pd.DataFrame({"close": df["close"]}, index=df.index)
+        f["atr"] = ind.atr(df["high"], df["low"], df["close"], self.atr_n)
+        f["ready"] = f["atr"].notna()
+        return f
+
+    def is_check_day(self, day, next_day) -> bool:
+        return True
+
+    def decide(self, day, rows: dict[str, pd.Series], positions: dict[str, Position], check_day: bool = True) -> list[Signal]:
+        sig, exiting = [], 0
+        for s, pos in positions.items():
+            r = rows.get(s)
+            if r is not None and r.fresh and pos.bars_held >= self.hold:
+                sig.append(Signal(self.name, s, "sell", "exit", day, f"time exit after {self.hold} bars", r.close))
+                exiting += 1
+        free = max(self.max_positions - (len(positions) - exiting), 0)
+        cands = sorted(s for s, r in rows.items() if s not in positions and r.fresh and r.ready)
+        rng = random.Random(f"{self.name}|{pd.Timestamp(day).date()}")
+        for s in rng.sample(cands, min(free, len(cands))):
+            sig.append(Signal(self.name, s, "buy", "entry", day, "monkey pick (random)", rows[s].close,
+                              stop_distance=self.atr_mult * rows[s].atr))
+        return sig
+
+
+STRATEGIES = {"s1_trend": S1Trend, "s2_pullback": S2Pullback, "s3_breakout": S3Breakout, "s4_monkey": S4Monkey}

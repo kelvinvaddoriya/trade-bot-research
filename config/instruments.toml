@@ -65,13 +65,13 @@ strategy = "s1_trend"
 yahoo = "4GLD.DE"
 proxy = "GLD"
 
-# --- S2: US large caps ---------------------------------------------------------
+# --- Stocks: S2 pullback, S3 breakout, S4 monkey. US names trade only in backtests until FX handling exists ---------------------------------------------------------
 [AAPL]
 name = "Apple"
 isin = "US0378331005"
 market = "XNYS"
 currency = "USD"
-strategy = "s2_pullback"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
 yahoo = "AAPL"
 alpaca = "AAPL"
 
@@ -80,7 +80,7 @@ name = "Microsoft"
 isin = "US5949181045"
 market = "XNYS"
 currency = "USD"
-strategy = "s2_pullback"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
 yahoo = "MSFT"
 alpaca = "MSFT"
 
@@ -89,7 +89,7 @@ name = "NVIDIA"
 isin = "US67066G1040"
 market = "XNYS"
 currency = "USD"
-strategy = "s2_pullback"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
 yahoo = "NVDA"
 alpaca = "NVDA"
 
@@ -98,7 +98,7 @@ name = "Amazon"
 isin = "US0231351067"
 market = "XNYS"
 currency = "USD"
-strategy = "s2_pullback"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
 yahoo = "AMZN"
 alpaca = "AMZN"
 
@@ -107,7 +107,7 @@ name = "Alphabet (Class A)"
 isin = "US02079K3059"
 market = "XNYS"
 currency = "USD"
-strategy = "s2_pullback"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
 yahoo = "GOOGL"
 alpaca = "GOOGL"
 
@@ -116,7 +116,7 @@ name = "Meta Platforms"
 isin = "US30303M1027"
 market = "XNYS"
 currency = "USD"
-strategy = "s2_pullback"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
 yahoo = "META"
 alpaca = "META"
 
@@ -125,7 +125,7 @@ name = "JPMorgan Chase"
 isin = "US46625H1005"
 market = "XNYS"
 currency = "USD"
-strategy = "s2_pullback"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
 yahoo = "JPM"
 alpaca = "JPM"
 
@@ -134,7 +134,7 @@ name = "Exxon Mobil"
 isin = "US30233Q1085"     # per Trading 212 metadata (2026-09-26); older listings show US30231G1022
 market = "XNYS"
 currency = "USD"
-strategy = "s2_pullback"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
 yahoo = "XOM"
 alpaca = "XOM"
 
@@ -144,7 +144,7 @@ name = "SAP"
 isin = "DE0007164600"
 market = "XETR"
 currency = "EUR"
-strategy = "s2_pullback"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
 yahoo = "SAP.DE"
 
 [SIE]
@@ -152,7 +152,7 @@ name = "Siemens"
 isin = "DE0007236101"
 market = "XETR"
 currency = "EUR"
-strategy = "s2_pullback"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
 yahoo = "SIE.DE"
 
 [ALV]
@@ -160,7 +160,7 @@ name = "Allianz"
 isin = "DE0008404005"
 market = "XETR"
 currency = "EUR"
-strategy = "s2_pullback"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
 yahoo = "ALV.DE"
 
 [DTE]
@@ -168,7 +168,7 @@ name = "Deutsche Telekom"
 isin = "DE0005557508"
 market = "XETR"
 currency = "EUR"
-strategy = "s2_pullback"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
 yahoo = "DTE.DE"
 
 [MUV2]
@@ -176,7 +176,7 @@ name = "Munich Re"
 isin = "DE0008430026"
 market = "XETR"
 currency = "EUR"
-strategy = "s2_pullback"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
 yahoo = "MUV2.DE"
 
 [BMW]
@@ -184,5 +184,103 @@ name = "BMW"
 isin = "DE0005190003"
 market = "XETR"
 currency = "EUR"
-strategy = "s2_pullback"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
 yahoo = "BMW.DE"
+
+# --- More German large caps (added 2026-09-30 for the demo experiments) ---
+
+[ADS]
+name = "Adidas"
+isin = "DE000A1EWWW0"
+market = "XETR"
+currency = "EUR"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
+yahoo = "ADS.DE"
+
+[IFX]
+name = "Infineon"
+isin = "DE0006231004"
+market = "XETR"
+currency = "EUR"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
+yahoo = "IFX.DE"
+
+[DBK]
+name = "Deutsche Bank"
+isin = "DE0005140008"
+market = "XETR"
+currency = "EUR"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
+yahoo = "DBK.DE"
+
+[MBG]
+name = "Mercedes-Benz Group"
+isin = "DE0007100000"
+market = "XETR"
+currency = "EUR"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
+yahoo = "MBG.DE"
+
+[BAS]
+name = "BASF"
+isin = "DE000BASF111"
+market = "XETR"
+currency = "EUR"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
+yahoo = "BAS.DE"
+
+[RHM]
+name = "Rheinmetall"
+isin = "DE0007030009"
+market = "XETR"
+currency = "EUR"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
+yahoo = "RHM.DE"
+
+[AIR]
+name = "Airbus"
+isin = "NL0000235190"
+market = "XETR"
+currency = "EUR"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
+yahoo = "AIR.DE"
+
+[DHL]
+name = "DHL Group"
+isin = "DE0005552004"
+market = "XETR"
+currency = "EUR"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
+yahoo = "DHL.DE"
+
+[BAYN]
+name = "Bayer"
+isin = "DE000BAY0017"
+market = "XETR"
+currency = "EUR"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
+yahoo = "BAYN.DE"
+
+[EOAN]
+name = "E.ON"
+isin = "DE000ENAG999"
+market = "XETR"
+currency = "EUR"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
+yahoo = "EOAN.DE"
+
+[DB1]
+name = "Deutsche Boerse"
+isin = "DE0005810055"
+market = "XETR"
+currency = "EUR"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
+yahoo = "DB1.DE"
+
+[ENR]
+name = "Siemens Energy"
+isin = "DE000ENER6Y0"
+market = "XETR"
+currency = "EUR"
+strategy = ["s2_pullback", "s3_breakout", "s4_monkey"]
+yahoo = "ENR.DE"

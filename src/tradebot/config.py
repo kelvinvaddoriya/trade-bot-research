@@ -66,6 +66,12 @@ def load_risk(path: Path = CONFIG_DIR / "risk.toml") -> dict:
     return cfg
 
 
+def trades(inst: dict, strategy: str) -> bool:
+    """`strategy` in instruments.toml is one name or a list of names."""
+    s = inst["strategy"]
+    return strategy in (s if isinstance(s, list) else [s])
+
+
 def load_instruments(path: Path = CONFIG_DIR / "instruments.toml") -> dict:
     cfg, _ = _load(path)
     for sym, inst in cfg.items():

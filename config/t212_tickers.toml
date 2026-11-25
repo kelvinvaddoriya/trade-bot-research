@@ -139,3 +139,87 @@ name = "Bayerische Motoren Werke"
 type = "STOCK"
 currency = "EUR"
 schedule = 54
+
+[ADS]
+ticker = "ADSd_EQ"
+name = "Adidas"
+type = "STOCK"
+currency = "EUR"
+schedule = 54
+
+[IFX]
+ticker = "IFXd_EQ"
+name = "Infineon Technologies"
+type = "STOCK"
+currency = "EUR"
+schedule = 54
+
+[DBK]
+ticker = "DBKd_EQ"
+name = "Deutsche Bank"
+type = "STOCK"
+currency = "EUR"
+schedule = 54
+
+[MBG]
+ticker = "DAId_EQ"
+name = "Mercedes-Benz"
+type = "STOCK"
+currency = "EUR"
+schedule = 54
+
+[BAS]
+ticker = "BASd_EQ"
+name = "BASF"
+type = "STOCK"
+currency = "EUR"
+schedule = 54
+
+[RHM]
+ticker = "RHMd_EQ"
+name = "Rheinmetall"
+type = "STOCK"
+currency = "EUR"
+schedule = 54
+
+[AIR]
+ticker = "AIRd_EQ"
+name = "Airbus"
+type = "STOCK"
+currency = "EUR"
+schedule = 54
+
+[DHL]
+ticker = "DPWd_EQ"
+name = "DHL"
+type = "STOCK"
+currency = "EUR"
+schedule = 54
+
+[BAYN]
+ticker = "BAYNd_EQ"
+name = "Bayer"
+type = "STOCK"
+currency = "EUR"
+schedule = 54
+
+[EOAN]
+ticker = "EOANd_EQ"
+name = "E.ON"
+type = "STOCK"
+currency = "EUR"
+schedule = 54
+
+[DB1]
+ticker = "DB1d_EQ"
+name = "Deutsche Boerse"
+type = "STOCK"
+currency = "EUR"
+schedule = 54
+
+[ENR]
+ticker = "ENRd_EQ"
+name = "Siemens Energy"
+type = "STOCK"
+currency = "EUR"
+schedule = 54

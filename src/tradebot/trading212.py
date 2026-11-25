@@ -27,9 +27,13 @@ class T212Error(Exception):
         self.status, self.body = status, body
 
 
-def qty(q: float) -> float:
-    """Round a quantity down to 4 decimals (never buy or sell more than intended)."""
-    return float(Decimal(repr(q)).quantize(Decimal("0.0001"), ROUND_DOWN))
+ENTRY_DECIMALS = 3      # Trading 212 rejected 4-decimal buys of cheaper instruments ("invalid quantity precision 3")
+
+
+def qty(q: float, places: int = 4) -> float:
+    """Round a quantity down (never buy or sell more than intended). Stops and exits use the broker's own fill
+    quantity at 4 decimals; new entries are sized at ENTRY_DECIMALS."""
+    return float(Decimal(repr(q)).quantize(Decimal(1).scaleb(-places), ROUND_DOWN))
 
 
 def price(p: float) -> float:
